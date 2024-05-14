@@ -19,7 +19,7 @@ FlexCAN_T4FD<CAN3, RX_SIZE_1024, TX_SIZE_16> m_CANInterface;
 void setup() {
   // Initialize serial communication for debugging
   Serial.begin(115200);
-  while (!Serial);
+  // while (!Serial); //when enabled does not start CAN Tx until serial monitor is opened
 
   CANFD_timings_t config;
   config.clock = CLK_24MHz;
