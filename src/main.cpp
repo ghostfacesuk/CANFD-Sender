@@ -4,7 +4,6 @@
 // Define CAN bus settings
 const int CAN3_BAUD_RATE = 1000000;  // 1 Mbps
 const int CAN3_DATA_RATE = 4000000;  // 4 Mbps
-const uint32_t FRAME_ID = 0x555;
 const int PAYLOAD_SIZE = 64;
 const uint8_t PAYLOAD_DATA = 0xFF;
 const int LED_Pin = 13;  // LED pin
@@ -19,6 +18,10 @@ FlexCAN_T4FD<CAN3, RX_SIZE_1024, TX_SIZE_16> m_CANInterface;
 
 // Payload data array
 uint8_t payloadData[PAYLOAD_SIZE] = {0};
+
+// CAN frame IDs array and current frame count
+uint32_t frameIDs[36];
+int frameCount = 1;  // Start with one frame
 
 void setup() {
   // Initialize serial communication for debugging
@@ -41,6 +44,17 @@ void setup() {
   pinMode(LED_Pin, OUTPUT);  // Set the LED pin as an output
   digitalWrite(LED_Pin, LOW);  // Ensure LED is off initially
   pinMode(logButton, INPUT_PULLUP);  // Set the log button as an input with internal pull-up resistor
+
+  // Initialize frame IDs
+  frameIDs[0] = 0x555;  // Initial frame ID
+  for (int i = 1; i < 36; i++) {
+    frameIDs[i] = frameIDs[i - 1] + 1;  // Increment each subsequent frame ID
+  }
+
+    // Configure mailboxes for sending
+  for (int i = 0; i < 36; i++) {
+    m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
+  }
 }
 
 void loop() {
@@ -64,7 +78,7 @@ void loop() {
   }
   lastButtonState = buttonState;  // Save the current state as the last state, for next loop iteration
 
-  // Check for serial input to switch payload modes
+  // Check for serial input to switch payload modes or adjust frame count
   if (Serial.available() > 0) {
     char input = Serial.read();
     if (input == '1') {
@@ -73,38 +87,56 @@ void loop() {
     } else if (input == '2') {
       useFFPayload = false;
       Serial.println("Switched to incrementing payload mode.");
+    } else if ((input == '+' || input == '=') && frameCount < 36) {
+      frameCount++;
+      Serial.print("Added frame with ID: ");
+      Serial.println(frameIDs[frameCount - 1], HEX);
+      Serial.print("Current frame count: ");
+      Serial.println(frameCount);
+    } else if ((input == '-' || input == '_') && frameCount > 1) {
+      frameCount--;
+      Serial.print("Removed frame, remaining frames: ");
+      Serial.println(frameCount);
+    } else if (input == 'h' || 'H') {
+      Serial.print("Press 1 for FF payload mode\n");
+      Serial.print("Press 2 for Incrementing payload mode\n");
+      Serial.print("Press + for to add a CAN frame\n");
+      Serial.print("Press - to remove a CAN frame\n");
+      Serial.print("CAN Settings is 1Mbps Baud, 4Mbps data rate\n");
     }
   }
 
   if (sendCAN) {
-    // Create CAN FD frame
-    CANFD_message_t msg;
-    msg.len = PAYLOAD_SIZE;    // 64 bytes payload
-    msg.id = FRAME_ID;         // Frame ID
-    msg.brs = true;            // Enable baud rate switching
-    msg.edl = true;            // Indicate extended data length (FD)
+    for (int f = 0; f < frameCount; f++) {
+      // Create CAN FD frame
+      CANFD_message_t msg;
+      msg.len = PAYLOAD_SIZE;    // 64 bytes payload
+      msg.id = frameIDs[f];      // Frame ID
+      msg.brs = true;            // Enable baud rate switching
+      msg.edl = true;            // Indicate extended data length (FD)
 
-    // Fill payload based on the current mode
-    if (useFFPayload) {
-      for (int i = 0; i < PAYLOAD_SIZE; i++) {
-        msg.buf[i] = PAYLOAD_DATA;
+      // Fill payload based on the current mode
+      if (useFFPayload) {
+        for (int i = 0; i < PAYLOAD_SIZE; i++) {
+          msg.buf[i] = PAYLOAD_DATA;
+        }
+      } else {
+        for (int i = 0; i < PAYLOAD_SIZE; i++) {
+          msg.buf[i] = payloadData[i];
+        }
       }
-    } else {
-      for (int i = 0; i < PAYLOAD_SIZE; i++) {
-        msg.buf[i] = payloadData[i];
-      }
-    }
 
-    // Send CAN FD frame
-    if (m_CANInterface.write(msg)) {
-      digitalWrite(LED_Pin, HIGH);  // Turn on the LED
-      sendCount++;
-      if (sendCount == 100) {
-        Serial.println("100 CAN FD frames sent.");
-        sendCount = 0;
+      // Send CAN FD frame
+      if (m_CANInterface.write(msg)) {
+        digitalWrite(LED_Pin, HIGH);  // Turn on the LED
+        sendCount++;
+        if (sendCount == 100) {
+         // Serial.println("100 CAN FD frames sent.");
+          sendCount = 0;
+        }
+      } else {
+        digitalWrite(LED_Pin, LOW);  // Turn off the LED if sending failed
       }
-    } else {
-      digitalWrite(LED_Pin, LOW);  // Turn off the LED if sending failed
     }
 
     // Increment payload data if in incrementing mode
