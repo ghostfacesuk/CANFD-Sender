@@ -12,6 +12,7 @@ const int logButton = 29;  // Button pin
 
 int sendCount = 0; // sending serial message 
 bool sendCAN = false; // Control flag for CAN sending
+bool useFFPayload = true; // Control flag for payload mode
 
 // Create CAN object
 FlexCAN_T4FD<CAN3, RX_SIZE_1024, TX_SIZE_16> m_CANInterface;
@@ -63,6 +64,18 @@ void loop() {
   }
   lastButtonState = buttonState;  // Save the current state as the last state, for next loop iteration
 
+  // Check for serial input to switch payload modes
+  if (Serial.available() > 0) {
+    char input = Serial.read();
+    if (input == '1') {
+      useFFPayload = true;
+      Serial.println("Switched to FF payload mode.");
+    } else if (input == '2') {
+      useFFPayload = false;
+      Serial.println("Switched to incrementing payload mode.");
+    }
+  }
+
   if (sendCAN) {
     // Create CAN FD frame
     CANFD_message_t msg;
@@ -71,9 +84,15 @@ void loop() {
     msg.brs = true;            // Enable baud rate switching
     msg.edl = true;            // Indicate extended data length (FD)
 
-    // Fill payload with 0xFF
-    for (int i = 0; i < PAYLOAD_SIZE; i++) {
-      msg.buf[i] = payloadData[i];
+    // Fill payload based on the current mode
+    if (useFFPayload) {
+      for (int i = 0; i < PAYLOAD_SIZE; i++) {
+        msg.buf[i] = PAYLOAD_DATA;
+      }
+    } else {
+      for (int i = 0; i < PAYLOAD_SIZE; i++) {
+        msg.buf[i] = payloadData[i];
+      }
     }
 
     // Send CAN FD frame
@@ -88,13 +107,15 @@ void loop() {
       digitalWrite(LED_Pin, LOW);  // Turn off the LED if sending failed
     }
 
-    // Increment payload data
-    for (int i = 0; i < PAYLOAD_SIZE; i++) {
-      payloadData[i]++;
-      if (payloadData[i] > 0xFF) {
-        payloadData[i] = 0;
+    // Increment payload data if in incrementing mode
+    if (!useFFPayload) {
+      for (int i = 0; i < PAYLOAD_SIZE; i++) {
+        payloadData[i]++;
+        if (payloadData[i] > 0xFF) {
+          payloadData[i] = 0;
+        }
+      }
     }
-  }
 
     // Wait for 10ms
     delay(10);
