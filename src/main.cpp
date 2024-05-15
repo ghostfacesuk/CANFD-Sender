@@ -102,7 +102,7 @@ void loop() {
       Serial.print("Press 2 for Incrementing payload mode\n");
       Serial.print("Press + for to add a CAN frame\n");
       Serial.print("Press - to remove a CAN frame\n");
-      Serial.print("CAN Settings is 1Mbps Baud, 4Mbps data rate\n");
+      Serial.print("CAN Settings is 1Mbps Baud, 4Mbps data rate");
     }
   }
 
