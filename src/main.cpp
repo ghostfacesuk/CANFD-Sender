@@ -16,6 +16,9 @@ bool sendCAN = false; // Control flag for CAN sending
 // Create CAN object
 FlexCAN_T4FD<CAN3, RX_SIZE_1024, TX_SIZE_16> m_CANInterface;
 
+// Payload data array
+uint8_t payloadData[PAYLOAD_SIZE] = {0};
+
 void setup() {
   // Initialize serial communication for debugging
   Serial.begin(115200);
@@ -70,7 +73,7 @@ void loop() {
 
     // Fill payload with 0xFF
     for (int i = 0; i < PAYLOAD_SIZE; i++) {
-      msg.buf[i] = PAYLOAD_DATA;
+      msg.buf[i] = payloadData[i];
     }
 
     // Send CAN FD frame
@@ -84,6 +87,14 @@ void loop() {
     } else {
       digitalWrite(LED_Pin, LOW);  // Turn off the LED if sending failed
     }
+
+    // Increment payload data
+    for (int i = 0; i < PAYLOAD_SIZE; i++) {
+      payloadData[i]++;
+      if (payloadData[i] > 0xFF) {
+        payloadData[i] = 0;
+    }
+  }
 
     // Wait for 10ms
     delay(10);
