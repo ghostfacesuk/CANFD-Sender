@@ -23,10 +23,13 @@ uint8_t payloadData[PAYLOAD_SIZE] = {0};
 uint32_t frameIDs[36];
 int frameCount = 1;  // Start with one frame
 
+// Function prototypes
+void handleSerialInput(char input);
+void sendCANFrames();
+
 void setup() {
-  // Initialize serial communication for debugging
   Serial.begin(115200);
-  // while (!Serial); //when enabled does not start CAN Tx until serial monitor is opened
+  while (!Serial); // Wait until serial console is opened
 
   CANFD_timings_t config;
   config.clock = CLK_24MHz;
@@ -41,116 +44,106 @@ void setup() {
   m_CANInterface.setRegions(64);
   m_CANInterface.enableMBInterrupts();
 
-  pinMode(LED_Pin, OUTPUT);  // Set the LED pin as an output
-  digitalWrite(LED_Pin, LOW);  // Ensure LED is off initially
-  pinMode(logButton, INPUT_PULLUP);  // Set the log button as an input with internal pull-up resistor
+  pinMode(LED_Pin, OUTPUT);
+  digitalWrite(LED_Pin, LOW);
+  pinMode(logButton, INPUT_PULLUP);
 
   // Initialize frame IDs
-  frameIDs[0] = 0x555;  // Initial frame ID
+  frameIDs[0] = 0x555;
   for (int i = 1; i < 36; i++) {
-    frameIDs[i] = frameIDs[i - 1] + 1;  // Increment each subsequent frame ID
+    frameIDs[i] = frameIDs[i - 1] + 1;
   }
 
-    // Configure mailboxes for sending
-  for (int i = 0; i < 36; i++) {
+  // Configure the first 14 mailboxes for sending
+  for (int i = 0; i < 14; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
 }
 
 void loop() {
-  static int lastButtonState = HIGH;  // the previous reading from the input pin
-  int buttonState = digitalRead(logButton);  // current state of the button
+  static int lastButtonState = HIGH;
+  int buttonState = digitalRead(logButton);
 
-  // Check if button state changed from high to low (button press)
+  // Button press handling
   if (buttonState == LOW && lastButtonState == HIGH) {
-    // Debounce delay
-    delay(50);
-    // Check button state again to confirm it is still pressed
+    delay(50); // Debounce
     if (digitalRead(logButton) == LOW) {
-      sendCAN = !sendCAN;  // Toggle the sending state
-      if (sendCAN) {
-        Serial.println("CAN transmission started.");
-      } else {
-        Serial.println("CAN transmission stopped.");
-        digitalWrite(LED_Pin, LOW);  // Ensure LED is off when transmission stops
-      }
+      sendCAN = !sendCAN;
+      Serial.println(sendCAN ? "CAN transmission started." : "CAN transmission stopped.");
+      digitalWrite(LED_Pin, sendCAN ? HIGH : LOW);
     }
   }
-  lastButtonState = buttonState;  // Save the current state as the last state, for next loop iteration
+  lastButtonState = buttonState;
 
-  // Check for serial input to switch payload modes or adjust frame count
+  // Serial command handling
   if (Serial.available() > 0) {
     char input = Serial.read();
-    if (input == '1') {
-      useFFPayload = true;
-      Serial.println("Switched to FF payload mode.");
-    } else if (input == '2') {
-      useFFPayload = false;
-      Serial.println("Switched to incrementing payload mode.");
-    } else if ((input == '+' || input == '=') && frameCount < 36) {
-      frameCount++;
-      Serial.print("Added frame with ID: ");
-      Serial.println(frameIDs[frameCount - 1], HEX);
-      Serial.print("Current frame count: ");
-      Serial.println(frameCount);
-    } else if ((input == '-' || input == '_') && frameCount > 1) {
-      frameCount--;
-      Serial.print("Removed frame, remaining frames: ");
-      Serial.println(frameCount);
-    } else if (input == 'h' || 'H') {
-      Serial.print("Press 1 for FF payload mode\n");
-      Serial.print("Press 2 for Incrementing payload mode\n");
-      Serial.print("Press + for to add a CAN frame\n");
-      Serial.print("Press - to remove a CAN frame\n");
-      Serial.print("CAN Settings is 1Mbps Baud, 4Mbps data rate");
-    }
+    handleSerialInput(input);
   }
 
+  // CAN message handling
   if (sendCAN) {
-    for (int f = 0; f < frameCount; f++) {
-      // Create CAN FD frame
-      CANFD_message_t msg;
-      msg.len = PAYLOAD_SIZE;    // 64 bytes payload
-      msg.id = frameIDs[f];      // Frame ID
-      msg.brs = true;            // Enable baud rate switching
-      msg.edl = true;            // Indicate extended data length (FD)
+    sendCANFrames();
+  }
+}
 
-      // Fill payload based on the current mode
-      if (useFFPayload) {
-        for (int i = 0; i < PAYLOAD_SIZE; i++) {
-          msg.buf[i] = PAYLOAD_DATA;
-        }
-      } else {
-        for (int i = 0; i < PAYLOAD_SIZE; i++) {
-          msg.buf[i] = payloadData[i];
-        }
-      }
 
-      // Send CAN FD frame
-      if (m_CANInterface.write(msg)) {
-        digitalWrite(LED_Pin, HIGH);  // Turn on the LED
-        sendCount++;
-        if (sendCount == 100) {
-         // Serial.println("100 CAN FD frames sent.");
-          sendCount = 0;
-        }
-      } else {
-        digitalWrite(LED_Pin, LOW);  // Turn off the LED if sending failed
+void handleSerialInput(char input) {
+  switch(input) {
+    case '1':
+      useFFPayload = true;
+      Serial.println("Switched to FF payload mode.");
+      break;
+    case '2':
+      useFFPayload = false;
+      Serial.println("Switched to incrementing payload mode.");
+      break;
+    case '+':
+    case '=':
+      if (frameCount < 36) {
+        frameCount++;
+        Serial.print("Frame count: ");
+        Serial.println(frameCount);
       }
+      break;
+    case '-':
+    case '_':
+      if (frameCount > 1) {
+        frameCount--;
+        Serial.print("Frame count: ");
+        Serial.println(frameCount);
+      }
+      break;
+  }
+}
+
+void sendCANFrames() {
+  for (int f = 0; f < frameCount; f++) {
+    int mailboxIndex = f % 14; // Cycling through 0 to 13
+    CANFD_message_t msg;
+    msg.len = PAYLOAD_SIZE;
+    msg.id = frameIDs[f];
+    msg.brs = true;
+    msg.edl = true;
+
+    for (int i = 0; i < PAYLOAD_SIZE; i++) {
+      msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
     }
 
-    // Increment payload data if in incrementing mode
+    if (!m_CANInterface.write((FLEXCAN_MAILBOX)mailboxIndex, msg)) {
+      Serial.print("Failed to send on MB ");
+      Serial.println(mailboxIndex);
+      digitalWrite(LED_Pin, LOW);
+    }
+
     if (!useFFPayload) {
       for (int i = 0; i < PAYLOAD_SIZE; i++) {
         payloadData[i]++;
-        if (payloadData[i] > 0xFF) {
-          payloadData[i] = 0;
-        }
+        if (payloadData[i] > 0xFF) payloadData[i] = 0;
       }
     }
-
-    // Wait for 10ms
-    delay(10);
-    digitalWrite(LED_Pin, LOW);  // Turn off the LED after delay, showing the LED on only when sending
   }
+
+  delay(10);
+  digitalWrite(LED_Pin, LOW); // Turn off LED after sending
 }
