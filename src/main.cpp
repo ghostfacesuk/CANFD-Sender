@@ -29,7 +29,7 @@ void sendCANFrames();
  
 void setup() {
   Serial.begin(115200);
-  while (!Serial); // Wait until serial console is opened
+  //while (!Serial); // Wait until serial console is opened
  
   CANFD_timings_t config;
   config.clock = CLK_24MHz;
@@ -147,6 +147,8 @@ void sendCANFrames() {
     msg.brs = true;
     msg.edl = true;
     msg.seq = true;
+
+    digitalWrite(LED_Pin, HIGH);
  
     for (int i = 0; i < PAYLOAD_SIZE; i++) {
       msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
@@ -166,5 +168,5 @@ void sendCANFrames() {
     }
   }
  
-  digitalWrite(LED_Pin, LOW); // Turn off LED after sending
+  //digitalWrite(LED_Pin, LOW); // Turn off LED after sending
 }
