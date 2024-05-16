@@ -124,6 +124,17 @@ void handleSerialInput(char input) {
         Serial.println(frameCount);
       }
       break;
+    case 'h':
+    case 'H':
+        Serial.print("Baud rate: ");
+        Serial.println(CAN3_BAUD_RATE);
+        Serial.print("Data rate: ");
+        Serial.println(CAN3_DATA_RATE);
+        Serial.print("Press 1 for FF payload mode\r\n");
+        Serial.print("Press 2 for Incrementing payload mode\r\n");
+        Serial.print("Press + to add a frame\r\n");
+        Serial.print("Press - to remove a frame\r\n");
+      break;
   }
 }
  

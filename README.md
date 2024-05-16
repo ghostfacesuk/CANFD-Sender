@@ -12,6 +12,6 @@
 ## Config & Behaviour
 * CAN is hardcoded to 1Mbps Baud, 4Mbps data rate
 * h for help in terminal (9600 baud)
-* Sends frames every 10ms (+/-) to send up to 36 frames
+* Sends frames every 10ms (+/-) to send up to 51 frames (51 = 100% bus load!)
 * Press button to start / stop transmission
 
