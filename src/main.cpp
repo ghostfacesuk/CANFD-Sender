@@ -14,6 +14,12 @@ const uint8_t PAYLOAD_DATA = 0xFF;
 const int LED_Pin = 13;  // LED pin
 const int logButton = 29;  // Button pin
 
+// Variables for bus load calculation
+const int CAN_FD_OVERHEAD = 29;  // CAN FD overhead bits (SOF, ID, Control, CRC, etc.)
+const int STUFF_BIT_RATIO = 5;   // Estimate: add 1 stuff bit every 5 bits
+uint32_t lastBusLoadCalc = 0;
+float currentBusLoad = 0.0;
+
 int sendCount = 0; // sending serial message 
 bool sendCAN = false; // Control flag for CAN sending
 bool useFFPayload = true; // Control flag for payload mode
@@ -33,6 +39,28 @@ void handleSerialInput(char input);
 void sendCANFrames();
 void updateCANSettings();
 void printCurrentRates();
+float calculateBusLoad();
+
+float calculateBusLoad() {
+  if (!sendCAN) return 0.0;
+  
+  // Calculate bits per frame
+  int dataBits = PAYLOAD_SIZE * 8;  // Data bits
+  int dataStuffBits = dataBits / STUFF_BIT_RATIO;  // Estimated stuff bits in data
+  
+  // Calculate time for arbitration phase (including stuff bits) and data phase
+  float arbitrationTime = (float)(CAN_FD_OVERHEAD + (CAN_FD_OVERHEAD / STUFF_BIT_RATIO)) / BAUD_RATES[currentBaudRateIndex];
+  float dataTime = (float)(dataBits + dataStuffBits) / DATA_RATES[currentDataRateIndex];
+  float totalFrameTime = arbitrationTime + dataTime;
+  
+  // Calculate frames per second (we're sending every 10ms)
+  float framesPerSecond = frameCount * (1000.0 / 10.0);  // 10ms interval
+  
+  // Calculate bus load percentage
+  float busLoad = (totalFrameTime * framesPerSecond) * 100.0;
+  
+  return min(busLoad, 100.0);  // Cap at 100%
+}
 
 void setup() {
   Serial.begin(115200);
@@ -86,6 +114,12 @@ uint32_t lastTx = 0;
 void loop() {
   static int lastButtonState = HIGH;
   int buttonState = digitalRead(logButton);
+
+  // Update bus load calculation every 500ms
+  if (sendCAN && (millis() - lastBusLoadCalc >= 500)) {
+    currentBusLoad = calculateBusLoad();
+    lastBusLoadCalc = millis();
+  }
 
   m_CANInterface.events();
 
@@ -155,6 +189,12 @@ void handleSerialInput(char input) {
         frameCount++;
         Serial.print("Frame count: ");
         Serial.println(frameCount);
+        if (sendCAN) {
+          currentBusLoad = calculateBusLoad();
+          Serial.print("Bus load: ");
+          Serial.print(currentBusLoad, 1);
+          Serial.println("%");
+        }
       }
       break;
     case '-':
@@ -163,6 +203,12 @@ void handleSerialInput(char input) {
         frameCount--;
         Serial.print("Frame count: ");
         Serial.println(frameCount);
+        if (sendCAN) {
+          currentBusLoad = calculateBusLoad();
+          Serial.print("Bus load: ");
+          Serial.print(currentBusLoad, 1);
+          Serial.println("%");
+        }
       }
       break;
     case 'h':
@@ -174,6 +220,11 @@ void handleSerialInput(char input) {
       Serial.print("d - Cycle data rate ");
       Serial.print(DATA_RATES[currentDataRateIndex] / 1000000.0, 1);
       Serial.println(" Mbps (when not transmitting)");
+      if (sendCAN) {
+        Serial.print("Current bus load: ");
+        Serial.print(currentBusLoad, 1);
+        Serial.println("%");
+      }
       Serial.println("1 - FF payload mode");
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
