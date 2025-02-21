@@ -40,6 +40,13 @@ void sendCANFrames();
 void updateCANSettings();
 void printCurrentRates();
 float calculateBusLoad();
+void clearTerminal();
+
+void clearTerminal() {
+  // ANSI escape codes to clear screen and move cursor to top
+  Serial.write("\033[2J");    // Clear screen
+  Serial.write("\033[H");     // Move cursor to home position (0,0)
+}
 
 float calculateBusLoad() {
   if (!sendCAN) return 0.0;
@@ -154,6 +161,7 @@ void loop() {
 }
 
 void handleSerialInput(char input) {
+  clearTerminal();  // Clear terminal before printing new information
   switch(input) {
     case 'b':
     case 'B':
@@ -213,6 +221,7 @@ void handleSerialInput(char input) {
       break;
     case 'h':
     case 'H':
+      Serial.println("=== CAN FD Controller ===");
       Serial.println("Commands available:");
       Serial.print("b - Cycle baud rate ");
       Serial.print(BAUD_RATES[currentBaudRateIndex] / 1000000.0, 3);
