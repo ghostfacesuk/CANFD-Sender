@@ -38,6 +38,7 @@ const uint32_t BUS_MONITOR_DURATION = 3000; // 3 seconds
 uint32_t framesSentDuringMonitoring = 0;
 uint32_t framesReceivedDuringMonitoring = 0;
 uint32_t lastReceivedCount = 0;
+uint32_t startingFrameCount = 0;  // Track starting frame count for differential measurement
 
 int sendCount = 0; // sending serial message 
 bool sendCAN = false; // Control flag for CAN sending
@@ -141,14 +142,17 @@ void setup() {
     frameIDs[i] = frameIDs[i - 1] + 1;
   }
 
-  // Configure the first 14 mailboxes for sending
-  for (int i = 0; i < 14; i++) {
+  // Configure mailboxes - use the last few mailboxes for receiving
+  for (int i = 0; i < 12; i++) {  // Use 12 instead of 14 for TX
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
   
-  // Configure at least one mailbox for receiving
-  m_CANInterface.setMB((FLEXCAN_MAILBOX)14, RX);
-  m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)14, ACCEPT_ALL);
+  // Set up at least 3 mailboxes for receiving
+  for (int i = 12; i < 15; i++) {  // Configure mailboxes 12-14 for RX
+    m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
+    m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
+  }
+  
   m_CANInterface.enableMBInterrupts();
 
   // Initialize frame counters
@@ -249,6 +253,18 @@ void updateCANSettings() {
   m_CANInterface.setBaudRate(config);
   m_CANInterface.setRegions(64);
   m_CANInterface.enableMBInterrupts();
+  
+  // Maintain dedicated RX mailboxes
+  // Configure mailboxes - use the last few mailboxes for receiving
+  for (int i = 0; i < 12; i++) {  // Use 12 instead of 14 for TX
+    m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
+  }
+  
+  // Set up at least 3 mailboxes for receiving
+  for (int i = 12; i < 15; i++) {  // Configure mailboxes 12-14 for RX
+    m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
+    m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
+  }
 }
 
 void printCurrentRates() {
@@ -280,11 +296,16 @@ void startBusLoadMonitoring() {
     framesReceivedDuringMonitoring = 0;
     lastReceivedCount = 0;
     
-    // Ensure we have proper mailbox configuration for receiving
-    if (!sendCAN) {
-      // Use at least one mailbox for receiving all messages
-      m_CANInterface.setMB((FLEXCAN_MAILBOX)0, RX);
-      m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)0, ACCEPT_ALL);
+    // If we're transmitting, store the starting frame count to measure the difference
+    if (sendCAN) {
+      startingFrameCount = totalFramesSent;
+    }
+    
+    // Make sure receive mailboxes are properly configured
+    // This ensures mailboxes 12-14 are configured for receiving
+    for (int i = 12; i < 15; i++) {
+      m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
+      m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
     }
     
     Serial.println("Starting bus load monitoring for 3 seconds...");
@@ -299,12 +320,8 @@ void measureBusLoad() {
     
     // Count frames we've sent during monitoring (if transmitting)
     if (sendCAN) {
-      // This needs to be the difference between start and end, not just the total
-      static uint32_t startFrameCount = 0;
-      if (elapsedTime <= 50) { // Record initial count near the start
-        startFrameCount = totalFramesSent;
-      }
-      framesSentDuringMonitoring = totalFramesSent - startFrameCount;
+      // Calculate the difference in frames sent during the monitoring period
+      framesSentDuringMonitoring = totalFramesSent - startingFrameCount;
     }
     
     // If monitoring period is over, show results
@@ -341,6 +358,8 @@ void measureBusLoad() {
       
       // Debug information
       Serial.println("\nDebug Info:");
+      Serial.print("Initial frame count: "); Serial.println(startingFrameCount);
+      Serial.print("Final frame count: "); Serial.println(totalFramesSent);
       Serial.print("Frames sent during monitoring: "); Serial.println(framesSentDuringMonitoring);
       Serial.print("Frames received during monitoring: "); Serial.println(framesReceivedDuringMonitoring);
       Serial.print("Monitor duration (s): "); Serial.println(monitorDuration);
@@ -379,15 +398,11 @@ void measureBusLoad() {
       Serial.println("%");
       Serial.println("=====================================");
       
-      // Restore mailboxes for transmitting if we modified them
-      if (!sendCAN) {
-        // Reconfigure the mailboxes for transmitting
-        for (int i = 0; i < 14; i++) {
-          m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
-        }
-        // Keep mailbox 14 for receiving
-        m_CANInterface.setMB((FLEXCAN_MAILBOX)14, RX);
-        m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)14, ACCEPT_ALL);
+      // Maintain proper mailbox configuration
+      // Keep mailboxes 12-14 for receiving
+      for (int i = 12; i < 15; i++) {
+        m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
+        m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
       }
     }
   }
@@ -410,9 +425,21 @@ void loop() {
   // Update bus monitoring if active
   if (isMonitoringBusLoad) {
     // Check for CAN messages while monitoring
+    // Read multiple frames if available to avoid losing frames
     CANFD_message_t rx_msg;
-    if (m_CANInterface.read(rx_msg)) {
-      framesReceivedDuringMonitoring++;
+    while (m_CANInterface.read(rx_msg)) {
+      // Only count messages from other nodes, not our own
+      bool isOurFrame = false;
+      for (int i = 0; i < frameCount; i++) {
+        if (rx_msg.id == frameIDs[i]) {
+          isOurFrame = true;
+          break;
+        }
+      }
+      
+      if (!isOurFrame) {
+        framesReceivedDuringMonitoring++;
+      }
     }
     
     measureBusLoad();
@@ -668,8 +695,8 @@ void handleSerialInput(char input) {
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
-      Serial.println("s - Show current statistics (during transmission)");
-      Serial.println("l - Measure bus load for 3 seconds");
+      Serial.println("S - Show current statistics (during transmission)");
+      Serial.println("L - Measure bus load for 3 seconds");
       break;
   }
 }
