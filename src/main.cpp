@@ -50,7 +50,7 @@ FlexCAN_T4FD<CAN3, RX_SIZE_1024, TX_SIZE_1024> m_CANInterface;
 uint8_t payloadData[FD_PAYLOAD_SIZE] = {0};
 
 // CAN frame IDs array and current frame count
-uint32_t frameIDs[51];
+uint32_t frameIDs[100];  // Increased from 51 to 100 max frames
 int frameCount = 1;  // Start with one frame
 
 // Function prototypes
@@ -137,7 +137,7 @@ void setup() {
 
   // Initialize frame IDs
   frameIDs[0] = 0x555;
-  for (int i = 1; i < 51; i++) {
+  for (int i = 1; i < 100; i++) {  // Increased to 100
     frameIDs[i] = frameIDs[i - 1] + 1;
   }
 
@@ -164,12 +164,12 @@ void initFrameCounters() {
   }
   
   // Allocate memory for per-ID frame counters
-  framesSentByID = (uint32_t*)malloc(51 * sizeof(uint32_t));
+  framesSentByID = (uint32_t*)malloc(100 * sizeof(uint32_t));  // Increased to 100
   
   // Initialize all counters to zero
   if (framesSentByID != NULL) {
     totalFramesSent = 0;
-    for (int i = 0; i < 51; i++) {
+    for (int i = 0; i < 100; i++) {  // Increased to 100
       framesSentByID[i] = 0;
     }
   }
@@ -206,7 +206,7 @@ void printFrameCountSummary() {
   Serial.println(elapsedTime > 0 ? (float)totalFramesSent / elapsedTime : 0);
   
   Serial.println("\nFrames sent per ID:");
-  for (int i = 0; i < frameCount; i++) {
+  for (int i = 0; i < frameCount && i < 100; i++) {  // Added bounds check
     Serial.print("0x");
     Serial.print(frameIDs[i], HEX);
     Serial.print(": ");
@@ -565,7 +565,7 @@ void handleSerialInput(char input) {
       break;
     case '+':
     case '=':
-      if (frameCount < 51) {
+      if (frameCount < 100) {  // Increased to 100
         frameCount++;
         Serial.print("Frame count: ");
         Serial.println(frameCount);
