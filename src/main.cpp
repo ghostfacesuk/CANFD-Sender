@@ -301,6 +301,15 @@ void handleSerialInput(char input) {
 }
 
 void sendCANFrames() {
+  // If not using FF payload, increment the payload data just once per cycle
+  // This ensures all frames get the same data values
+  if (!useFFPayload) {
+    for (int i = 0; i < currentPayloadSize; i++) {
+      payloadData[i]++;
+      if (payloadData[i] > 0xFF) payloadData[i] = 0;
+    }
+  }
+
   for (int f = 0; f < frameCount; f++) {
     int mailboxIndex = f % 14; // Cycling through 0 to 13
     
@@ -343,13 +352,6 @@ void sendCANFrames() {
         Serial.print("Failed to send standard frame on MB ");
         Serial.println(mailboxIndex);
         digitalWrite(LED_Pin, LOW);
-      }
-    }
-
-    if (!useFFPayload) {
-      for (int i = 0; i < currentPayloadSize; i++) {
-        payloadData[i]++;
-        if (payloadData[i] > 0xFF) payloadData[i] = 0;
       }
     }
   }
