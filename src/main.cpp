@@ -25,6 +25,12 @@ const int STUFF_BIT_RATIO = 5;   // Estimate: add 1 stuff bit every 5 bits
 uint32_t lastBusLoadCalc = 0;
 float currentBusLoad = 0.0;
 
+// Frame counting variables
+uint32_t totalFramesSent = 0;  // Total frames sent in current session
+uint32_t* framesSentByID = NULL;  // Array to track frames sent per ID
+uint32_t sessionStartTime = 0;  // When the current session started
+bool countingFrames = false;  // Whether we're currently counting frames
+
 int sendCount = 0; // sending serial message 
 bool sendCAN = false; // Control flag for CAN sending
 bool useFFPayload = true; // Control flag for payload mode
@@ -47,6 +53,8 @@ void printCurrentRates();
 float calculateBusLoad();
 void clearTerminal();
 void toggleCANMode();
+void initFrameCounters();
+void printFrameCountSummary();
 
 void clearTerminal() {
   // ANSI escape codes to clear screen and move cursor to top
@@ -103,7 +111,68 @@ void setup() {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
 
+  // Initialize frame counters
+  initFrameCounters();
+
   printCurrentRates();
+}
+
+void initFrameCounters() {
+  // Free existing counter if it exists
+  if (framesSentByID != NULL) {
+    free(framesSentByID);
+  }
+  
+  // Allocate memory for per-ID frame counters
+  framesSentByID = (uint32_t*)malloc(51 * sizeof(uint32_t));
+  
+  // Initialize all counters to zero
+  if (framesSentByID != NULL) {
+    totalFramesSent = 0;
+    for (int i = 0; i < 51; i++) {
+      framesSentByID[i] = 0;
+    }
+  }
+}
+
+void printFrameCountSummary() {
+  uint32_t elapsedTime = (millis() - sessionStartTime) / 1000; // seconds
+  
+  Serial.println("\n=== Frame Transmission Summary ===");
+  Serial.print("Session duration: ");
+  
+  // Format the time as hours:minutes:seconds
+  uint32_t hours = elapsedTime / 3600;
+  uint32_t minutes = (elapsedTime % 3600) / 60;
+  uint32_t seconds = elapsedTime % 60;
+  
+  if (hours > 0) {
+    Serial.print(hours);
+    Serial.print(" hours, ");
+  }
+  
+  if (minutes > 0 || hours > 0) {
+    Serial.print(minutes);
+    Serial.print(" minutes, ");
+  }
+  
+  Serial.print(seconds);
+  Serial.println(" seconds");
+  
+  Serial.print("Total frames sent: ");
+  Serial.println(totalFramesSent);
+  
+  Serial.print("Average frames per second: ");
+  Serial.println(elapsedTime > 0 ? (float)totalFramesSent / elapsedTime : 0);
+  
+  Serial.println("\nFrames sent per ID:");
+  for (int i = 0; i < frameCount; i++) {
+    Serial.print("0x");
+    Serial.print(frameIDs[i], HEX);
+    Serial.print(": ");
+    Serial.println(framesSentByID[i]);
+  }
+  Serial.println("===============================");
 }
 
 void toggleCANMode() {
@@ -177,7 +246,22 @@ void loop() {
     if (digitalRead(logButton) == LOW) {
       sendCAN = !sendCAN;
       lastTx = millis();
-      Serial.println(sendCAN ? "CAN transmission started." : "CAN transmission stopped.");
+      
+      if (sendCAN) {
+        // Starting transmission
+        Serial.println("CAN transmission started.");
+        // Reset and start counting
+        initFrameCounters();
+        countingFrames = true;
+        sessionStartTime = millis();
+      } else {
+        // Stopping transmission
+        Serial.println("CAN transmission stopped.");
+        countingFrames = false;
+        // Print the summary of frames sent
+        printFrameCountSummary();
+      }
+      
       digitalWrite(LED_Pin, sendCAN ? HIGH : LOW);
     }
   }
@@ -272,6 +356,24 @@ void handleSerialInput(char input) {
         }
       }
       break;
+    case 's':
+    case 'S':
+      if (countingFrames) {
+        Serial.println("\n=== Current Session Statistics ===");
+        uint32_t elapsedTime = (millis() - sessionStartTime) / 1000; // seconds
+        Serial.print("Time elapsed: ");
+        Serial.print(elapsedTime);
+        Serial.println(" seconds");
+        Serial.print("Total frames sent so far: ");
+        Serial.println(totalFramesSent);
+        Serial.print("Current rate: ");
+        Serial.print(elapsedTime > 0 ? (float)totalFramesSent / elapsedTime : 0);
+        Serial.println(" frames/second");
+        Serial.println("=================================");
+      } else {
+        Serial.println("No active transmission session.");
+      }
+      break;
     case 'h':
     case 'H':
       Serial.println("=== CAN Controller ===");
@@ -296,6 +398,7 @@ void handleSerialInput(char input) {
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
+      Serial.println("s - Show current statistics (during transmission)");
       break;
   }
 }
@@ -312,6 +415,7 @@ void sendCANFrames() {
 
   for (int f = 0; f < frameCount; f++) {
     int mailboxIndex = f % 14; // Cycling through 0 to 13
+    bool frameSent = false;
     
     if (canFDMode) {
       // Use CAN FD message format
@@ -320,6 +424,7 @@ void sendCANFrames() {
       msg.id = frameIDs[f];
       msg.brs = true;  // Bit Rate Switch
       msg.edl = true;  // Extended Data Length
+      msg.esi = false; // Error State Indicator - set to false
       msg.seq = true;
 
       digitalWrite(LED_Pin, HIGH);
@@ -328,7 +433,8 @@ void sendCANFrames() {
         msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
       }
 
-      if (!m_CANInterface.write(msg)) {
+      frameSent = m_CANInterface.write(msg);
+      if (!frameSent) {
         Serial.print("Failed to send FD frame on MB ");
         Serial.println(mailboxIndex);
         digitalWrite(LED_Pin, LOW);
@@ -348,11 +454,18 @@ void sendCANFrames() {
         msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
       }
 
-      if (!m_CANInterface.write(msg)) {
+      frameSent = m_CANInterface.write(msg);
+      if (!frameSent) {
         Serial.print("Failed to send standard frame on MB ");
         Serial.println(mailboxIndex);
         digitalWrite(LED_Pin, LOW);
       }
+    }
+    
+    // Increment the frame counters if the frame was sent successfully
+    if (frameSent && countingFrames && framesSentByID != NULL) {
+      totalFramesSent++;
+      framesSentByID[f]++;
     }
   }
 }
