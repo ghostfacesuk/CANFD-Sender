@@ -299,7 +299,12 @@ void measureBusLoad() {
     
     // Count frames we've sent during monitoring (if transmitting)
     if (sendCAN) {
-      framesSentDuringMonitoring = totalFramesSent;
+      // This needs to be the difference between start and end, not just the total
+      static uint32_t startFrameCount = 0;
+      if (elapsedTime <= 50) { // Record initial count near the start
+        startFrameCount = totalFramesSent;
+      }
+      framesSentDuringMonitoring = totalFramesSent - startFrameCount;
     }
     
     // If monitoring period is over, show results
@@ -333,6 +338,18 @@ void measureBusLoad() {
       // Calculate bus load as percentage of current baud rate
       float busSpeed = (float)BAUD_RATES[currentBaudRateIndex];
       float totalBusLoad = (bitsPerSecond / busSpeed) * 100.0;
+      
+      // Debug information
+      Serial.println("\nDebug Info:");
+      Serial.print("Frames sent during monitoring: "); Serial.println(framesSentDuringMonitoring);
+      Serial.print("Frames received during monitoring: "); Serial.println(framesReceivedDuringMonitoring);
+      Serial.print("Monitor duration (s): "); Serial.println(monitorDuration);
+      Serial.print("Our frames/s: "); Serial.println(ourFramesPerSecond);
+      Serial.print("Other frames/s: "); Serial.println(otherFramesPerSecond);
+      Serial.print("Frame bits: "); Serial.println(frameBits);
+      Serial.print("Bits/s: "); Serial.println(bitsPerSecond);
+      Serial.print("Bus speed: "); Serial.println(busSpeed);
+      Serial.print("Raw bus load calculation: "); Serial.println(totalBusLoad);
       
       // Cap at 100% for display purposes
       if (totalBusLoad > 100.0) totalBusLoad = 100.0;
@@ -651,8 +668,8 @@ void handleSerialInput(char input) {
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
-      Serial.println("S - Show current statistics (during transmission)");
-      Serial.println("L - Measure bus load for 3 seconds");
+      Serial.println("s - Show current statistics (during transmission)");
+      Serial.println("l - Measure bus load for 3 seconds");
       break;
   }
 }
