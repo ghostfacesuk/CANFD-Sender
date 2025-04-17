@@ -63,15 +63,40 @@ void clearTerminal() {
 }
 
 float calculateBusLoad() {
-  if (!sendCAN) return 0.0;
+  static uint32_t lastFrameCount = 0;
+  static uint32_t lastCalcTime = 0;
+  static float lastBusLoad = 0.0;
+  
+  uint32_t currentTime = millis();
+  uint32_t elapsedTime = currentTime - lastCalcTime;
+  
+  // Only recalculate every 200ms to avoid fluctuations
+  if (elapsedTime < 200) {
+    return lastBusLoad;
+  }
+  
+  // Calculate frames transmitted since last check
+  uint32_t framesTransmitted = totalFramesSent - lastFrameCount;
+  lastFrameCount = totalFramesSent;
+  lastCalcTime = currentTime;
+  
+  // If no frames or not transmitting, assume the previous value or 0
+  if (framesTransmitted == 0 || !sendCAN) {
+    lastBusLoad = sendCAN ? lastBusLoad : 0.0;
+    return lastBusLoad;
+  }
+  
+  // Calculate frames per second based on actual transmission rate
+  float framesPerSecond = (float)framesTransmitted / (elapsedTime / 1000.0);
   
   // Calculate bits per frame
   int dataBits = currentPayloadSize * 8;  // Data bits
   int dataStuffBits = dataBits / STUFF_BIT_RATIO;  // Estimated stuff bits in data
   int overhead = canFDMode ? CAN_FD_OVERHEAD : CAN_STD_OVERHEAD;
+  int overheadStuffBits = overhead / STUFF_BIT_RATIO;
   
-  // Calculate time for arbitration phase (including stuff bits) and data phase
-  float arbitrationTime = (float)(overhead + (overhead / STUFF_BIT_RATIO)) / BAUD_RATES[currentBaudRateIndex];
+  // Calculate time for arbitration phase and data phase
+  float arbitrationTime = (float)(overhead + overheadStuffBits) / BAUD_RATES[currentBaudRateIndex];
   float dataTime;
   
   if (canFDMode) {
@@ -82,13 +107,13 @@ float calculateBusLoad() {
   
   float totalFrameTime = arbitrationTime + dataTime;
   
-  // Calculate frames per second (we're sending every 10ms)
-  float framesPerSecond = frameCount * (1000.0 / 10.0);  // 10ms interval
+  // Calculate bus load percentage based on actual measured rate
+  lastBusLoad = (totalFrameTime * framesPerSecond) * 100.0;
   
-  // Calculate bus load percentage
-  float busLoad = (totalFrameTime * framesPerSecond) * 100.0;
+  // Since we can't measure other nodes' traffic without the statistics API,
+  // we'll add a warning in the help menu about this limitation
   
-  return min(busLoad, 100.0);  // Cap at 100%
+  return min(lastBusLoad, 100.0);  // Cap at 100%
 }
 
 void setup() {
@@ -238,10 +263,11 @@ void loop() {
   static int lastButtonState = HIGH;
   int buttonState = digitalRead(logButton);
 
-  // Update bus load calculation every 500ms
-  if (sendCAN && (millis() - lastBusLoadCalc >= 500)) {
+  // Update bus load calculation periodically but don't print automatically
+  static uint32_t lastBusUpdateTime = 0;
+  if (sendCAN && (millis() - lastBusUpdateTime >= 250)) {
     currentBusLoad = calculateBusLoad();
-    lastBusLoadCalc = millis();
+    lastBusUpdateTime = millis();
   }
 
   m_CANInterface.events();
@@ -341,10 +367,11 @@ void handleSerialInput(char input) {
         Serial.print("Frame count: ");
         Serial.println(frameCount);
         if (sendCAN) {
+          // Update and display bus load
           currentBusLoad = calculateBusLoad();
           Serial.print("Bus load: ");
           Serial.print(currentBusLoad, 1);
-          Serial.println("%");
+          Serial.println("% (this device only)");
         }
       }
       break;
@@ -355,10 +382,11 @@ void handleSerialInput(char input) {
         Serial.print("Frame count: ");
         Serial.println(frameCount);
         if (sendCAN) {
+          // Update and display bus load
           currentBusLoad = calculateBusLoad();
           Serial.print("Bus load: ");
           Serial.print(currentBusLoad, 1);
-          Serial.println("%");
+          Serial.println("% (this device only)");
         }
       }
       break;
@@ -375,6 +403,13 @@ void handleSerialInput(char input) {
         Serial.print("Current rate: ");
         Serial.print(elapsedTime > 0 ? (float)totalFramesSent / elapsedTime : 0);
         Serial.println(" frames/second");
+        
+        // Update and display bus load
+        currentBusLoad = calculateBusLoad();
+        Serial.print("Bus load: ");
+        Serial.print(currentBusLoad, 1);
+        Serial.println("% (this device only)");
+        
         Serial.println("=================================");
       } else {
         Serial.println("No active transmission session.");
@@ -407,7 +442,7 @@ void handleSerialInput(char input) {
       if (sendCAN) {
         Serial.print("Current bus load: ");
         Serial.print(currentBusLoad, 1);
-        Serial.println("%");
+        Serial.println("% (Note: Displays only this device's contribution)");
       }
       Serial.println("1 - FF payload mode");
       Serial.println("2 - Incrementing payload mode");
