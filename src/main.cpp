@@ -651,8 +651,8 @@ void handleSerialInput(char input) {
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
-      Serial.println("s - Show current statistics (during transmission)");
-      Serial.println("l - Measure bus load for 3 seconds");
+      Serial.println("S - Show current statistics (during transmission)");
+      Serial.println("L - Measure bus load for 3 seconds");
       break;
   }
 }
