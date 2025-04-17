@@ -2,8 +2,8 @@
 #include <FlexCAN_T4.h>
 
 // Define CAN bus settings
-const int NUM_BAUD_RATES = 2;
-const int BAUD_RATES[NUM_BAUD_RATES] = {1000000, 500000};  // 1 Mbps, 500 Kbps
+const int NUM_BAUD_RATES = 5;
+const int BAUD_RATES[NUM_BAUD_RATES] = {1000000, 500000, 250000, 125000, 100000};  // 1 Mbps, 500 Kbps, 250 Kbps, 125 Kbps, 100 Kbps
 const int NUM_DATA_RATES = 4;
 const int DATA_RATES[NUM_DATA_RATES] = {1000000, 2000000, 4000000, 5000000};  // 1, 2, 4, 5 Mbps
 int currentBaudRateIndex = 0;
@@ -216,8 +216,14 @@ void printCurrentRates() {
   Serial.println(canFDMode ? "FD (64-byte payload)" : "Standard (8-byte payload)");
   
   Serial.print("Baud Rate: ");
-  Serial.print(BAUD_RATES[currentBaudRateIndex] / 1000000.0, 3);
-  Serial.println(" Mbps");
+  float baudRate = BAUD_RATES[currentBaudRateIndex] / 1000000.0;
+  if (baudRate >= 1.0) {
+    Serial.print(baudRate, 3);
+    Serial.println(" Mbps");
+  } else {
+    Serial.print(BAUD_RATES[currentBaudRateIndex] / 1000.0, 1);
+    Serial.println(" Kbps");
+  }
   
   if (canFDMode) {
     Serial.print("Data Rate: ");
@@ -381,9 +387,18 @@ void handleSerialInput(char input) {
       Serial.print("m - Toggle CAN mode (");
       Serial.print(canFDMode ? "FD" : "Standard");
       Serial.println(")");
-      Serial.print("b - Cycle baud rate ");
-      Serial.print(BAUD_RATES[currentBaudRateIndex] / 1000000.0, 3);
-      Serial.println(" Mbps");
+      Serial.print("b - Cycle baud rate: ");
+      
+      // Display the current baud rate
+      float baudRate = BAUD_RATES[currentBaudRateIndex] / 1000000.0;
+      if (baudRate >= 1.0) {
+        Serial.print(baudRate, 3);
+        Serial.println(" Mbps");
+      } else {
+        Serial.print(BAUD_RATES[currentBaudRateIndex] / 1000.0, 1);
+        Serial.println(" Kbps");
+      }
+      
       if (canFDMode) {
         Serial.print("d - Cycle data rate ");
         Serial.print(DATA_RATES[currentDataRateIndex] / 1000000.0, 1);
