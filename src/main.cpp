@@ -31,6 +31,14 @@ uint32_t* framesSentByID = NULL;  // Array to track frames sent per ID
 uint32_t sessionStartTime = 0;  // When the current session started
 bool countingFrames = false;  // Whether we're currently counting frames
 
+// Bus load monitoring variables
+bool isMonitoringBusLoad = false;
+uint32_t busMonitorStartTime = 0;
+const uint32_t BUS_MONITOR_DURATION = 3000; // 3 seconds
+uint32_t framesSentDuringMonitoring = 0;
+uint32_t framesReceivedDuringMonitoring = 0;
+uint32_t lastReceivedCount = 0;
+
 int sendCount = 0; // sending serial message 
 bool sendCAN = false; // Control flag for CAN sending
 bool useFFPayload = true; // Control flag for payload mode
@@ -55,6 +63,8 @@ void clearTerminal();
 void toggleCANMode();
 void initFrameCounters();
 void printFrameCountSummary();
+void startBusLoadMonitoring();
+void measureBusLoad();
 
 void clearTerminal() {
   // ANSI escape codes to clear screen and move cursor to top
@@ -135,6 +145,11 @@ void setup() {
   for (int i = 0; i < 14; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
+  
+  // Configure at least one mailbox for receiving
+  m_CANInterface.setMB((FLEXCAN_MAILBOX)14, RX);
+  m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)14, ACCEPT_ALL);
+  m_CANInterface.enableMBInterrupts();
 
   // Initialize frame counters
   initFrameCounters();
@@ -257,6 +272,110 @@ void printCurrentRates() {
   }
 }
 
+void startBusLoadMonitoring() {
+  if (!isMonitoringBusLoad) {
+    isMonitoringBusLoad = true;
+    busMonitorStartTime = millis();
+    framesSentDuringMonitoring = 0;
+    framesReceivedDuringMonitoring = 0;
+    lastReceivedCount = 0;
+    
+    // Ensure we have proper mailbox configuration for receiving
+    if (!sendCAN) {
+      // Use at least one mailbox for receiving all messages
+      m_CANInterface.setMB((FLEXCAN_MAILBOX)0, RX);
+      m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)0, ACCEPT_ALL);
+    }
+    
+    Serial.println("Starting bus load monitoring for 3 seconds...");
+  }
+}
+
+void measureBusLoad() {
+  if (isMonitoringBusLoad) {
+    // Monitor time elapsed
+    uint32_t currentTime = millis();
+    uint32_t elapsedTime = currentTime - busMonitorStartTime;
+    
+    // Count frames we've sent during monitoring (if transmitting)
+    if (sendCAN) {
+      framesSentDuringMonitoring = totalFramesSent;
+    }
+    
+    // If monitoring period is over, show results
+    if (elapsedTime >= BUS_MONITOR_DURATION) {
+      isMonitoringBusLoad = false;
+      
+      // Calculate frames per second and bus load
+      float monitorDuration = elapsedTime / 1000.0; // seconds
+      
+      // Count our transmitted frames
+      float ourFramesPerSecond = 0;
+      if (sendCAN) {
+        ourFramesPerSecond = framesSentDuringMonitoring / monitorDuration;
+      }
+      
+      // Count received frames from other nodes
+      float otherFramesPerSecond = framesReceivedDuringMonitoring / monitorDuration;
+      
+      // Combined frames per second
+      float totalFramesPerSecond = ourFramesPerSecond + otherFramesPerSecond;
+      
+      // Calculate average frame size based on current mode
+      // For simplicity, assume other nodes are using same format as we are
+      int frameBits = canFDMode ? 
+        ((FD_PAYLOAD_SIZE * 8) + CAN_FD_OVERHEAD + (FD_PAYLOAD_SIZE * 8 / STUFF_BIT_RATIO)) :
+        ((STD_PAYLOAD_SIZE * 8) + CAN_STD_OVERHEAD + (STD_PAYLOAD_SIZE * 8 / STUFF_BIT_RATIO));
+      
+      // Calculate bits per second
+      float bitsPerSecond = totalFramesPerSecond * frameBits;
+      
+      // Calculate bus load as percentage of current baud rate
+      float busSpeed = (float)BAUD_RATES[currentBaudRateIndex];
+      float totalBusLoad = (bitsPerSecond / busSpeed) * 100.0;
+      
+      // Cap at 100% for display purposes
+      if (totalBusLoad > 100.0) totalBusLoad = 100.0;
+      
+      // Show results
+      Serial.println("\n=== Bus Load Measurement Results ===");
+      Serial.print("Monitoring period: ");
+      Serial.print(monitorDuration, 1);
+      Serial.println(" seconds");
+      
+      if (sendCAN) {
+        Serial.print("Frames sent by us: ");
+        Serial.println(framesSentDuringMonitoring);
+        Serial.print("Our frames per second: ");
+        Serial.println(ourFramesPerSecond, 1);
+      }
+      
+      Serial.print("Frames from other nodes: ");
+      Serial.println(framesReceivedDuringMonitoring);
+      Serial.print("Other nodes frames per second: ");
+      Serial.println(otherFramesPerSecond, 1);
+      
+      Serial.print("Total frames per second: ");
+      Serial.println(totalFramesPerSecond, 1);
+      Serial.print("Estimated total bus load: ");
+      Serial.print(totalBusLoad, 1);
+      Serial.println("%");
+      Serial.println("=====================================");
+      
+      // Restore mailboxes for transmitting if we modified them
+      if (!sendCAN) {
+        // Reconfigure the mailboxes for transmitting
+        for (int i = 0; i < 14; i++) {
+          m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
+        }
+        // Keep mailbox 14 for receiving
+        m_CANInterface.setMB((FLEXCAN_MAILBOX)14, RX);
+        m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)14, ACCEPT_ALL);
+      }
+    }
+  }
+}
+
 uint32_t lastTx = 0;
 
 void loop() {
@@ -268,6 +387,18 @@ void loop() {
   if (sendCAN && (millis() - lastBusUpdateTime >= 250)) {
     currentBusLoad = calculateBusLoad();
     lastBusUpdateTime = millis();
+  }
+  
+// In the loop function, modify the bus monitoring code to check for messages from other nodes
+  // Update bus monitoring if active
+  if (isMonitoringBusLoad) {
+    // Check for CAN messages while monitoring
+    CANFD_message_t rx_msg;
+    if (m_CANInterface.read(rx_msg)) {
+      framesReceivedDuringMonitoring++;
+    }
+    
+    measureBusLoad();
   }
 
   m_CANInterface.events();
@@ -317,6 +448,74 @@ void loop() {
   }
 }
 
+void sendCANFrames() {
+  // If not using FF payload, increment the payload data just once per cycle
+  // This ensures all frames get the same data values
+  if (!useFFPayload) {
+    for (int i = 0; i < currentPayloadSize; i++) {
+      payloadData[i]++;
+      if (payloadData[i] > 0xFF) payloadData[i] = 0;
+    }
+  }
+
+  for (int f = 0; f < frameCount; f++) {
+    int mailboxIndex = f % 14; // Cycling through 0 to 13
+    bool frameSent = false;
+    
+    if (canFDMode) {
+      // Use CAN FD message format
+      CANFD_message_t msg;
+      msg.len = currentPayloadSize;
+      msg.id = frameIDs[f];
+      msg.brs = true;  // Bit Rate Switch
+      msg.edl = true;  // Extended Data Length
+      msg.esi = false; // Error State Indicator - set to false
+      msg.seq = true;
+
+      digitalWrite(LED_Pin, HIGH);
+
+      for (int i = 0; i < currentPayloadSize; i++) {
+        msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
+      }
+
+      frameSent = m_CANInterface.write(msg);
+      if (!frameSent) {
+        Serial.print("Failed to send FD frame on MB ");
+        Serial.println(mailboxIndex);
+        digitalWrite(LED_Pin, LOW);
+      }
+    } else {
+      // Use Standard CAN message format - send using the FD API but with standard flags
+      CANFD_message_t msg;
+      msg.len = currentPayloadSize;
+      msg.id = frameIDs[f];
+      msg.brs = false;  // No Bit Rate Switch for standard CAN
+      msg.edl = false;  // No Extended Data Length for standard CAN
+      msg.esi = false;  // Error State Indicator - set to false
+      msg.seq = true;
+
+      digitalWrite(LED_Pin, HIGH);
+
+      for (int i = 0; i < currentPayloadSize; i++) {
+        msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
+      }
+
+      frameSent = m_CANInterface.write(msg);
+      if (!frameSent) {
+        Serial.print("Failed to send standard frame on MB ");
+        Serial.println(mailboxIndex);
+        digitalWrite(LED_Pin, LOW);
+      }
+    }
+    
+    // Increment the frame counters if the frame was sent successfully
+    if (frameSent && countingFrames && framesSentByID != NULL) {
+      totalFramesSent++;
+      framesSentByID[f]++;
+    }
+  }
+}
+
 void handleSerialInput(char input) {
   clearTerminal();  // Clear terminal before printing new information
   switch(input) {
@@ -351,6 +550,10 @@ void handleSerialInput(char input) {
       } else {
         Serial.println("Cannot change CAN mode while transmitting!");
       }
+      break;
+    case 'l':
+    case 'L':
+      startBusLoadMonitoring();
       break;
     case '1':
       useFFPayload = true;
@@ -449,73 +652,7 @@ void handleSerialInput(char input) {
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
       Serial.println("s - Show current statistics (during transmission)");
+      Serial.println("l - Measure bus load for 3 seconds");
       break;
-  }
-}
-
-void sendCANFrames() {
-  // If not using FF payload, increment the payload data just once per cycle
-  // This ensures all frames get the same data values
-  if (!useFFPayload) {
-    for (int i = 0; i < currentPayloadSize; i++) {
-      payloadData[i]++;
-      if (payloadData[i] > 0xFF) payloadData[i] = 0;
-    }
-  }
-
-  for (int f = 0; f < frameCount; f++) {
-    int mailboxIndex = f % 14; // Cycling through 0 to 13
-    bool frameSent = false;
-    
-    if (canFDMode) {
-      // Use CAN FD message format
-      CANFD_message_t msg;
-      msg.len = currentPayloadSize;
-      msg.id = frameIDs[f];
-      msg.brs = true;  // Bit Rate Switch
-      msg.edl = true;  // Extended Data Length
-      msg.esi = false; // Error State Indicator - set to false
-      msg.seq = true;
-
-      digitalWrite(LED_Pin, HIGH);
-
-      for (int i = 0; i < currentPayloadSize; i++) {
-        msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
-      }
-
-      frameSent = m_CANInterface.write(msg);
-      if (!frameSent) {
-        Serial.print("Failed to send FD frame on MB ");
-        Serial.println(mailboxIndex);
-        digitalWrite(LED_Pin, LOW);
-      }
-    } else {
-      // Use Standard CAN message format - send using the FD API but with standard flags
-      CANFD_message_t msg;
-      msg.len = currentPayloadSize;
-      msg.id = frameIDs[f];
-      msg.brs = false;  // No Bit Rate Switch for standard CAN
-      msg.edl = false;  // No Extended Data Length for standard CAN
-      msg.seq = true;
-
-      digitalWrite(LED_Pin, HIGH);
-
-      for (int i = 0; i < currentPayloadSize; i++) {
-        msg.buf[i] = useFFPayload ? PAYLOAD_DATA : payloadData[i];
-      }
-
-      frameSent = m_CANInterface.write(msg);
-      if (!frameSent) {
-        Serial.print("Failed to send standard frame on MB ");
-        Serial.println(mailboxIndex);
-        digitalWrite(LED_Pin, LOW);
-      }
-    }
-    
-    // Increment the frame counters if the frame was sent successfully
-    if (frameSent && countingFrames && framesSentByID != NULL) {
-      totalFramesSent++;
-      framesSentByID[f]++;
-    }
   }
 }
