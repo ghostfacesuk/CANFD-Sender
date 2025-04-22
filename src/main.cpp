@@ -482,11 +482,10 @@ void loop() {
 
   // CAN message handling
   if (sendCAN) {
-    if ((millis()-lastTx) >= 10) {
-      if ((millis()-lastTx) > 100)
-        lastTx = millis();
-      else
-        lastTx += 10;
+    uint32_t currentTime = millis();
+    if ((currentTime - lastTx) >= 10) {
+      // Always reset to the current time to avoid cumulative drift
+      lastTx = currentTime;
       sendCANFrames();
     }
   }
