@@ -1,17 +1,17 @@
 # Teensy_CAN_Sender
 
 ## Teensy 4.1
-* Andy's dodgy dev board
+* Andy's dodgy dev board (purple)
 
 
 ## How to use
-* Connect LEMO to CAN FD bus
-* bus currently hardcoded! (make sure its setup before connecting)
+* Connect LEMO to CAN or CAN FD bus
+* Config bus (use 'h' for help)
+* Press the black button on the board to start and stop sending CAN
 
 
 ## Config & Behaviour
-* CAN is hardcoded to 1Mbps Baud, 4Mbps data rate
-* h for help in terminal (9600 baud)
-* Sends frames every 10ms (+/-) to send up to 51 frames (51 = 100% bus load!)
-* Press button to start / stop transmission
+* Terminal is 115200 (USB port)
+* Toggle between CAN and CAN FD using 'm'
+* Sends frames every 10ms 
 
