@@ -22,6 +22,44 @@ const int logButton = 29;  // Button pin
 const int CAN_FD_OVERHEAD = 29;  // CAN FD overhead bits (SOF, ID, Control, CRC, etc.)
 const int CAN_STD_OVERHEAD = 44;  // Standard CAN overhead bits
 const int STUFF_BIT_RATIO = 5;   // Estimate: add 1 stuff bit every 5 bits
+
+// -----------------------------------------------------------------------------
+// Improved FD and Classic CAN bit‐timing constants
+static const int FD_ARB_BASE_BITS      = 50;   // SOF, ID, DLC, flags, ACK, EOF, IFS @ nominal speed
+static const int FD_DATA_BASE_BITS     = 533;  // 64 bytes (512 bits) + 21‐bit CRC @ data speed
+static const int CLASSIC_CAN_BASE_BITS = 47;   // ~47 bits typical for 11‐bit ID, 8‐byte data
+
+// Rough stuff‐bit ratios
+static const float FD_ARB_STUFF_RATIO   = 1.0f/4;   // ~1 stuff bit every 4 bits
+static const float FD_DATA_STUFF_RATIO  = 1.0f/10;  // ~1 stuff bit every 10 bits
+static const float CLASSIC_STUFF_RATIO  = 1.0f/5;   // typical for Classic CAN
+
+// Estimate time (in seconds) to send one frame
+float estimateFrameTime(bool isFD, int payloadBytes) {
+  int nominalBaud = BAUD_RATES[currentBaudRateIndex];
+  int dataBaud    = DATA_RATES[currentDataRateIndex];
+
+  if (!isFD) {
+    // Classic CAN
+    int overheadBits = CLASSIC_CAN_BASE_BITS
+                     + int(CLASSIC_CAN_BASE_BITS * CLASSIC_STUFF_RATIO);
+    int dataBits     = payloadBytes * 8;
+    dataBits        += int(dataBits * CLASSIC_STUFF_RATIO);
+    return float(overheadBits + dataBits) / float(nominalBaud);
+  } else {
+    // CAN FD
+    int arbBits  = FD_ARB_BASE_BITS
+                 + int(FD_ARB_BASE_BITS * FD_ARB_STUFF_RATIO);
+    int dataBits = payloadBytes * 8 + 21;  // assume 21‐bit CRC for >16 B
+    dataBits    += int(dataBits * FD_DATA_STUFF_RATIO);
+
+    float arbTime  = float(arbBits)  / float(nominalBaud);
+    float dataTime = float(dataBits) / float(dataBaud);
+    return arbTime + dataTime;
+  }
+}
+// -----------------------------------------------------------------------------
+
 uint32_t lastBusLoadCalc = 0;
 float currentBusLoad = 0.0;
 
@@ -73,59 +111,41 @@ void clearTerminal() {
   Serial.write("\033[H");     // Move cursor to home position (0,0)
 }
 
+// -----------------------------------------------------------------------------
 float calculateBusLoad() {
   static uint32_t lastFrameCount = 0;
-  static uint32_t lastCalcTime = 0;
-  static float lastBusLoad = 0.0;
-  
-  uint32_t currentTime = millis();
-  uint32_t elapsedTime = currentTime - lastCalcTime;
-  
-  // Only recalculate every 200ms to avoid fluctuations
-  if (elapsedTime < 200) {
+  static uint32_t lastCalcTime   = 0;
+  static float    lastBusLoad    = 0.0f;
+
+  uint32_t now     = millis();
+  uint32_t elapsed = now - lastCalcTime;
+  if (elapsed < 200) {
+    // only recalc every 200ms
     return lastBusLoad;
   }
-  
-  // Calculate frames transmitted since last check
-  uint32_t framesTransmitted = totalFramesSent - lastFrameCount;
+
+  uint32_t sent  = totalFramesSent - lastFrameCount;
   lastFrameCount = totalFramesSent;
-  lastCalcTime = currentTime;
-  
-  // If no frames or not transmitting, assume the previous value or 0
-  if (framesTransmitted == 0 || !sendCAN) {
-    lastBusLoad = sendCAN ? lastBusLoad : 0.0;
+  lastCalcTime   = now;
+
+  if (sent == 0 || !sendCAN) {
+    // no new frames or not sending => zero or previous
+    lastBusLoad = sendCAN ? lastBusLoad : 0.0f;
     return lastBusLoad;
   }
-  
-  // Calculate frames per second based on actual transmission rate
-  float framesPerSecond = (float)framesTransmitted / (elapsedTime / 1000.0);
-  
-  // Calculate bits per frame
-  int dataBits = currentPayloadSize * 8;  // Data bits
-  int dataStuffBits = dataBits / STUFF_BIT_RATIO;  // Estimated stuff bits in data
-  int overhead = canFDMode ? CAN_FD_OVERHEAD : CAN_STD_OVERHEAD;
-  int overheadStuffBits = overhead / STUFF_BIT_RATIO;
-  
-  // Calculate time for arbitration phase and data phase
-  float arbitrationTime = (float)(overhead + overheadStuffBits) / BAUD_RATES[currentBaudRateIndex];
-  float dataTime;
-  
-  if (canFDMode) {
-    dataTime = (float)(dataBits + dataStuffBits) / DATA_RATES[currentDataRateIndex];
-  } else {
-    dataTime = (float)(dataBits + dataStuffBits) / BAUD_RATES[currentBaudRateIndex];
-  }
-  
-  float totalFrameTime = arbitrationTime + dataTime;
-  
-  // Calculate bus load percentage based on actual measured rate
-  lastBusLoad = (totalFrameTime * framesPerSecond) * 100.0;
-  
-  // Since we can't measure other nodes' traffic without the statistics API,
-  // we'll add a warning in the help menu about this limitation
-  
-  return min(lastBusLoad, 100.0);  // Cap at 100%
+
+  // frames per second
+  float fps = float(sent) / (elapsed / 1000.0f);
+
+  // time per frame
+  float tFrame = estimateFrameTime(canFDMode, currentPayloadSize);
+
+  // bus‐load %
+  float load = fps * tFrame * 100.0f;
+  lastBusLoad = (load > 100.0f) ? 100.0f : load;
+  return lastBusLoad;
 }
+// -----------------------------------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
@@ -238,8 +258,6 @@ void toggleCANMode() {
 
 void updateCANSettings() {
   // We need to stop and restart the controller
-  // Since both reset() and end() are private/unavailable, let's just create a new configuration
-  
   CANFD_timings_t config;
   config.clock = CLK_24MHz;
   config.baudrate = BAUD_RATES[currentBaudRateIndex];
@@ -255,13 +273,10 @@ void updateCANSettings() {
   m_CANInterface.enableMBInterrupts();
   
   // Maintain dedicated RX mailboxes
-  // Configure mailboxes - use the last few mailboxes for receiving
-  for (int i = 0; i < 12; i++) {  // Use 12 instead of 14 for TX
+  for (int i = 0; i < 12; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
-  
-  // Set up at least 3 mailboxes for receiving
-  for (int i = 12; i < 15; i++) {  // Configure mailboxes 12-14 for RX
+  for (int i = 12; i < 15; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
     m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
   }
@@ -302,7 +317,6 @@ void startBusLoadMonitoring() {
     }
     
     // Make sure receive mailboxes are properly configured
-    // This ensures mailboxes 12-14 are configured for receiving
     for (int i = 12; i < 15; i++) {
       m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
       m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
@@ -313,97 +327,42 @@ void startBusLoadMonitoring() {
 }
 
 void measureBusLoad() {
-  if (isMonitoringBusLoad) {
-    // Monitor time elapsed
-    uint32_t currentTime = millis();
-    uint32_t elapsedTime = currentTime - busMonitorStartTime;
-    
-    // Count frames we've sent during monitoring (if transmitting)
-    if (sendCAN) {
-      // Calculate the difference in frames sent during the monitoring period
-      framesSentDuringMonitoring = totalFramesSent - startingFrameCount;
-    }
-    
-    // If monitoring period is over, show results
-    if (elapsedTime >= BUS_MONITOR_DURATION) {
-      isMonitoringBusLoad = false;
-      
-      // Calculate frames per second and bus load
-      float monitorDuration = elapsedTime / 1000.0; // seconds
-      
-      // Count our transmitted frames
-      float ourFramesPerSecond = 0;
-      if (sendCAN) {
-        ourFramesPerSecond = framesSentDuringMonitoring / monitorDuration;
-      }
-      
-      // Count received frames from other nodes
-      float otherFramesPerSecond = framesReceivedDuringMonitoring / monitorDuration;
-      
-      // Combined frames per second
-      float totalFramesPerSecond = ourFramesPerSecond + otherFramesPerSecond;
-      
-      // Calculate average frame size based on current mode
-      // For simplicity, assume other nodes are using same format as we are
-      int frameBits = canFDMode ? 
-        ((FD_PAYLOAD_SIZE * 8) + CAN_FD_OVERHEAD + (FD_PAYLOAD_SIZE * 8 / STUFF_BIT_RATIO)) :
-        ((STD_PAYLOAD_SIZE * 8) + CAN_STD_OVERHEAD + (STD_PAYLOAD_SIZE * 8 / STUFF_BIT_RATIO));
-      
-      // Calculate bits per second
-      float bitsPerSecond = totalFramesPerSecond * frameBits;
-      
-      // Calculate bus load as percentage of current baud rate
-      float busSpeed = (float)BAUD_RATES[currentBaudRateIndex];
-      float totalBusLoad = (bitsPerSecond / busSpeed) * 100.0;
-      
-      // Debug information
-      Serial.println("\nDebug Info:");
-      Serial.print("Initial frame count: "); Serial.println(startingFrameCount);
-      Serial.print("Final frame count: "); Serial.println(totalFramesSent);
-      Serial.print("Frames sent during monitoring: "); Serial.println(framesSentDuringMonitoring);
-      Serial.print("Frames received during monitoring: "); Serial.println(framesReceivedDuringMonitoring);
-      Serial.print("Monitor duration (s): "); Serial.println(monitorDuration);
-      Serial.print("Our frames/s: "); Serial.println(ourFramesPerSecond);
-      Serial.print("Other frames/s: "); Serial.println(otherFramesPerSecond);
-      Serial.print("Frame bits: "); Serial.println(frameBits);
-      Serial.print("Bits/s: "); Serial.println(bitsPerSecond);
-      Serial.print("Bus speed: "); Serial.println(busSpeed);
-      Serial.print("Raw bus load calculation: "); Serial.println(totalBusLoad);
-      
-      // Cap at 100% for display purposes
-      if (totalBusLoad > 100.0) totalBusLoad = 100.0;
-      
-      // Show results
-      Serial.println("\n=== Bus Load Measurement Results ===");
-      Serial.print("Monitoring period: ");
-      Serial.print(monitorDuration, 1);
-      Serial.println(" seconds");
-      
-      if (sendCAN) {
-        Serial.print("Frames sent by us: ");
-        Serial.println(framesSentDuringMonitoring);
-        Serial.print("Our frames per second: ");
-        Serial.println(ourFramesPerSecond, 1);
-      }
-      
-      Serial.print("Frames from other nodes: ");
-      Serial.println(framesReceivedDuringMonitoring);
-      Serial.print("Other nodes frames per second: ");
-      Serial.println(otherFramesPerSecond, 1);
-      
-      Serial.print("Total frames per second: ");
-      Serial.println(totalFramesPerSecond, 1);
-      Serial.print("Estimated total bus load: ");
-      Serial.print(totalBusLoad, 1);
-      Serial.println("%");
-      Serial.println("=====================================");
-      
-      // Maintain proper mailbox configuration
-      // Keep mailboxes 12-14 for receiving
-      for (int i = 12; i < 15; i++) {
-        m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
-        m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
-      }
+  if (!isMonitoringBusLoad) return;
+
+  uint32_t now     = millis();
+  uint32_t elapsed = now - busMonitorStartTime;
+
+  // Count our sent frames during the 3s window
+  if (sendCAN) {
+    framesSentDuringMonitoring = totalFramesSent - startingFrameCount;
+  }
+
+  // Once 3s is up, compute & print
+  if (elapsed >= BUS_MONITOR_DURATION) {
+    isMonitoringBusLoad = false;
+    float durS    = elapsed / 1000.0f;
+    float ourFps  = framesSentDuringMonitoring / durS;
+    float otherFps= framesReceivedDuringMonitoring / durS;
+    float totalFps= ourFps + otherFps;
+
+    // Use the same per-frame timing as calculateBusLoad()
+    float tFrame  = estimateFrameTime(canFDMode, currentPayloadSize);
+    float rawLoad = totalFps * tFrame * 100.0f;
+    if (rawLoad > 100.0f) rawLoad = 100.0f;
+
+    // Print fully left-aligned
+    Serial.println();
+    Serial.println("=== Bus Load Results (3s) ===");
+    Serial.print  ("Our fps:           "); Serial.println(ourFps, 1);
+    Serial.print  ("Other fps:         "); Serial.println(otherFps, 1);
+    Serial.print  ("Total fps:         "); Serial.println(totalFps, 1);
+    Serial.print  ("Est. bus load:     "); Serial.print(rawLoad, 1); Serial.println("%");
+    Serial.println("=============================");
+
+    // Re-arm the RX mailboxes
+    for (int i = 12; i < 15; i++) {
+      m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
+      m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
     }
   }
 }
@@ -421,14 +380,10 @@ void loop() {
     lastBusUpdateTime = millis();
   }
   
-// In the loop function, modify the bus monitoring code to check for messages from other nodes
   // Update bus monitoring if active
   if (isMonitoringBusLoad) {
-    // Check for CAN messages while monitoring
-    // Read multiple frames if available to avoid losing frames
     CANFD_message_t rx_msg;
     while (m_CANInterface.read(rx_msg)) {
-      // Only count messages from other nodes, not our own
       bool isOurFrame = false;
       for (int i = 0; i < frameCount; i++) {
         if (rx_msg.id == frameIDs[i]) {
@@ -436,12 +391,10 @@ void loop() {
           break;
         }
       }
-      
       if (!isOurFrame) {
         framesReceivedDuringMonitoring++;
       }
     }
-    
     measureBusLoad();
   }
 
@@ -492,8 +445,6 @@ void loop() {
 }
 
 void sendCANFrames() {
-  // If not using FF payload, increment the payload data just once per cycle
-  // This ensures all frames get the same data values
   if (!useFFPayload) {
     for (int i = 0; i < currentPayloadSize; i++) {
       payloadData[i]++;
@@ -502,17 +453,15 @@ void sendCANFrames() {
   }
 
   for (int f = 0; f < frameCount; f++) {
-    int mailboxIndex = f % 14; // Cycling through 0 to 13
     bool frameSent = false;
     
     if (canFDMode) {
-      // Use CAN FD message format
       CANFD_message_t msg;
       msg.len = currentPayloadSize;
       msg.id = frameIDs[f];
-      msg.brs = true;  // Bit Rate Switch
-      msg.edl = true;  // Extended Data Length
-      msg.esi = false; // Error State Indicator - set to false
+      msg.brs = true;  
+      msg.edl = true;  
+      msg.esi = false; 
       msg.seq = true;
 
       digitalWrite(LED_Pin, HIGH);
@@ -523,18 +472,17 @@ void sendCANFrames() {
 
       frameSent = m_CANInterface.write(msg);
       if (!frameSent) {
-        Serial.print("Failed to send FD frame on MB ");
-        Serial.println(mailboxIndex);
+        Serial.print("Failed to send FD frame on ID 0x");
+        Serial.println(frameIDs[f], HEX);
         digitalWrite(LED_Pin, LOW);
       }
     } else {
-      // Use Standard CAN message format - send using the FD API but with standard flags
       CANFD_message_t msg;
       msg.len = currentPayloadSize;
       msg.id = frameIDs[f];
-      msg.brs = false;  // No Bit Rate Switch for standard CAN
-      msg.edl = false;  // No Extended Data Length for standard CAN
-      msg.esi = false;  // Error State Indicator - set to false
+      msg.brs = false;
+      msg.edl = false;
+      msg.esi = false;
       msg.seq = true;
 
       digitalWrite(LED_Pin, HIGH);
@@ -545,13 +493,12 @@ void sendCANFrames() {
 
       frameSent = m_CANInterface.write(msg);
       if (!frameSent) {
-        Serial.print("Failed to send standard frame on MB ");
-        Serial.println(mailboxIndex);
+        Serial.print("Failed to send standard frame on ID 0x");
+        Serial.println(frameIDs[f], HEX);
         digitalWrite(LED_Pin, LOW);
       }
     }
     
-    // Increment the frame counters if the frame was sent successfully
     if (frameSent && countingFrames && framesSentByID != NULL) {
       totalFramesSent++;
       framesSentByID[f]++;
@@ -560,7 +507,7 @@ void sendCANFrames() {
 }
 
 void handleSerialInput(char input) {
-  clearTerminal();  // Clear terminal before printing new information
+  clearTerminal();
   switch(input) {
     case 'b':
     case 'B':
@@ -608,12 +555,11 @@ void handleSerialInput(char input) {
       break;
     case '+':
     case '=':
-      if (frameCount < 100) {  // Increased to 100
+      if (frameCount < 100) {
         frameCount++;
         Serial.print("Frame count: ");
         Serial.println(frameCount);
         if (sendCAN) {
-          // Update and display bus load
           currentBusLoad = calculateBusLoad();
           Serial.print("Bus load: ");
           Serial.print(currentBusLoad, 1);
@@ -628,7 +574,6 @@ void handleSerialInput(char input) {
         Serial.print("Frame count: ");
         Serial.println(frameCount);
         if (sendCAN) {
-          // Update and display bus load
           currentBusLoad = calculateBusLoad();
           Serial.print("Bus load: ");
           Serial.print(currentBusLoad, 1);
@@ -650,7 +595,6 @@ void handleSerialInput(char input) {
         Serial.print(elapsedTime > 0 ? (float)totalFramesSent / elapsedTime : 0);
         Serial.println(" frames/second");
         
-        // Update and display bus load
         currentBusLoad = calculateBusLoad();
         Serial.print("Bus load: ");
         Serial.print(currentBusLoad, 1);
@@ -670,7 +614,6 @@ void handleSerialInput(char input) {
       Serial.println(")");
       Serial.print("b - Cycle baud rate: ");
       
-      // Display the current baud rate
       float baudRate = BAUD_RATES[currentBaudRateIndex] / 1000000.0;
       if (baudRate >= 1.0) {
         Serial.print(baudRate, 3);
@@ -690,6 +633,7 @@ void handleSerialInput(char input) {
         Serial.print(currentBusLoad, 1);
         Serial.println("% (Note: Displays only this device's contribution)");
       }
+      Serial.println("\r\n=== Live modes ===");
       Serial.println("1 - FF payload mode");
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
