@@ -330,6 +330,22 @@ void handleSerialInput(char input) {
       }
       break;
 
+    case 'p': case 'P':
+      sendCAN = !sendCAN;
+      digitalWrite(LED_Pin, sendCAN ? HIGH : LOW);
+      if (sendCAN) {
+        Serial.println("CAN transmission started.");
+        initFrameCounters();
+        countingFrames   = true;
+        sessionStartTime = millis();
+        lastTxMicros     = micros();
+      } else {
+        Serial.println("CAN transmission stopped.");
+        countingFrames = false;
+        printFrameCountSummary();
+      }
+      break;
+
     case 'l': case 'L':
       startBusLoadMonitoring();
       break;
@@ -412,6 +428,7 @@ void handleSerialInput(char input) {
       Serial.println("2 - Incrementing payload mode");
       Serial.println("+ - Add a frame");
       Serial.println("- - Remove a frame");
+      Serial.println("P - Toggle CAN transmission start/stop");
       Serial.println("S - Show current statistics (during transmission)");
       Serial.println("L - Measure bus load for 3 seconds");
       Serial.println("9 - Toggle TX interval 10ms <-> 9.7ms");
