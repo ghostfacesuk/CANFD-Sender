@@ -68,8 +68,18 @@ uint8_t payloadData[FD_PAYLOAD_SIZE] = {0};
 uint32_t frameIDs[100];
 int frameCount = 1;
 
-// 9.7 ms vs 10 ms toggle
-bool use97ms = false;
+// TX frequency options
+const int NUM_TX_RATES = 4;
+const unsigned long TX_INTERVALS_US[NUM_TX_RATES] = {
+  1000000UL,  // 1 Hz
+  100000UL,   // 10 Hz
+  20000UL,    // 50 Hz
+  10000UL     // 100 Hz
+};
+const char* TX_RATE_LABELS[NUM_TX_RATES] = {
+  "1 Hz", "10 Hz", "50 Hz", "100 Hz"
+};
+int currentTxRateIndex = 3;  // default 100 Hz
 unsigned long lastTxMicros = 0;
 
 //-----------------------------------------------------------------------------
@@ -291,11 +301,10 @@ void sendCANFrames() {
 void handleSerialInput(char input) {
   clearTerminal();
   switch (input) {
-    case '9':
-      use97ms = !use97ms;
-      Serial.print("Transmission interval set to ");
-      Serial.print(use97ms ? 9.7f : 10.0f, 1);
-      Serial.println(" ms");
+    case 'f': case 'F':
+      currentTxRateIndex = (currentTxRateIndex + 1) % NUM_TX_RATES;
+      Serial.print("TX rate: ");
+      Serial.println(TX_RATE_LABELS[currentTxRateIndex]);
       break;
 
     case 'b': case 'B':
@@ -431,7 +440,8 @@ void handleSerialInput(char input) {
       Serial.println("P - Toggle CAN transmission start/stop");
       Serial.println("S - Show current statistics (during transmission)");
       Serial.println("L - Measure bus load for 3 seconds");
-      Serial.println("9 - Toggle TX interval 10ms <-> 9.7ms");
+      Serial.print("f - Cycle TX rate: ");
+      Serial.println(TX_RATE_LABELS[currentTxRateIndex]);
       break;
   }
 }
@@ -513,10 +523,10 @@ void loop() {
   }
   lastBtn = btn;
 
-  // TX at 10ms or 9.7ms
+  // TX at selected frequency
   if (sendCAN) {
     unsigned long now = micros();
-    unsigned long interval = use97ms ? 9700UL : 10000UL;
+    unsigned long interval = TX_INTERVALS_US[currentTxRateIndex];
     if (now - lastTxMicros >= interval) {
       lastTxMicros += interval;
       sendCANFrames();
@@ -525,14 +535,6 @@ void loop() {
 
   // serial commands
   if (Serial.available()) {
-    char c = Serial.read();
-    if (c == '9') {
-      use97ms = !use97ms;
-      Serial.print("TX interval now ");
-      Serial.print(use97ms ? 9.7f : 10.0f, 1);
-      Serial.println(" ms");
-    } else {
-      handleSerialInput(c);
-    }
+    handleSerialInput(Serial.read());
   }
 }
