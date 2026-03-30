@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <FlexCAN_T4.h>
+#include <SD.h>
 
 //-----------------------------------------------------------------------------
 // Global constants & globals
@@ -82,6 +83,43 @@ const char* TX_RATE_LABELS[NUM_TX_RATES] = {
 int currentTxRateIndex = 3;  // default 100 Hz
 unsigned long lastTxMicros = 0;
 
+// ASC Replay constants
+const int ASC_MAX_FILES = 10;
+const int ASC_MAX_FILENAME = 64;
+const int ASC_LINE_BUF_SIZE = 512;
+const int ASC_MAX_FRAMES_PER_TICK = 50;
+
+// ASC Replay state
+bool ascMode = false;
+bool ascPlaying = false;
+bool ascFileOpen = false;
+bool ascFileHasFD = false;
+bool sdCardPresent = false;
+File ascFile;
+char ascFileList[ASC_MAX_FILES][ASC_MAX_FILENAME];
+uint32_t ascFileSizes[ASC_MAX_FILES];
+int ascFileCount = 0;
+int ascSelectedFile = -1;
+
+// ASC Replay timing
+unsigned long ascStartMicros = 0;
+double ascFirstTimestamp = -1.0;
+uint32_t ascFramesSent = 0;
+uint32_t ascLoopCount = 0;
+uint32_t ascReplayStartTime = 0;
+
+// ASC Pending frame
+struct ASCFrame {
+  double timestamp;
+  uint32_t id;
+  uint8_t data[64];
+  uint8_t len;
+  bool isFD;
+};
+bool ascFrameReady = false;
+ASCFrame ascPendingFrame;
+char ascLineBuf[ASC_LINE_BUF_SIZE];
+
 //-----------------------------------------------------------------------------
 // Function prototypes
 //-----------------------------------------------------------------------------
@@ -97,6 +135,24 @@ void startBusLoadMonitoring();
 void measureBusLoad();
 void sendCANFrames();
 void handleSerialInput(char input);
+
+// ASC Replay prototypes
+bool scanFileForFD(const char* filename);
+void listASCFiles();
+void printASCMenu();
+void printASCReplayStatus();
+void enterASCMode();
+void exitASCMode();
+void selectASCFile(int index);
+void startASCReplay();
+void stopASCReplay();
+bool readLineFromFile();
+bool parseASCLine(ASCFrame& frame);
+void sendASCFrame(const ASCFrame& frame);
+bool readNextASCFrame();
+void loopASCFile();
+void processASCReplay();
+void handleASCSerialInput(char input);
 
 //-----------------------------------------------------------------------------
 // Implementation
@@ -298,6 +354,431 @@ void sendCANFrames() {
   }
 }
 
+//-----------------------------------------------------------------------------
+// ASC Replay Implementation
+//-----------------------------------------------------------------------------
+
+bool scanFileForFD(const char* filename) {
+  File f = SD.open(filename);
+  if (!f) return false;
+  int state = 0;
+  while (f.available()) {
+    char c = f.read();
+    switch (state) {
+      case 0: state = (c == 'C') ? 1 : 0; break;
+      case 1: state = (c == 'A') ? 2 : (c == 'C') ? 1 : 0; break;
+      case 2: state = (c == 'N') ? 3 : (c == 'C') ? 1 : 0; break;
+      case 3: state = (c == 'F') ? 4 : (c == 'C') ? 1 : 0; break;
+      case 4:
+        if (c == 'D') { f.close(); return true; }
+        state = (c == 'C') ? 1 : 0;
+        break;
+    }
+  }
+  f.close();
+  return false;
+}
+
+void listASCFiles() {
+  ascFileCount = 0;
+  File root = SD.open("/");
+  if (!root) return;
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    if (entry.isDirectory()) { entry.close(); continue; }
+    const char* name = entry.name();
+    int len = strlen(name);
+    if (len >= 4 && strcasecmp(name + len - 4, ".asc") == 0) {
+      if (ascFileCount < ASC_MAX_FILES) {
+        strncpy(ascFileList[ascFileCount], name, ASC_MAX_FILENAME - 1);
+        ascFileList[ascFileCount][ASC_MAX_FILENAME - 1] = '\0';
+        ascFileSizes[ascFileCount] = entry.size();
+        ascFileCount++;
+      }
+    }
+    entry.close();
+  }
+  root.close();
+}
+
+void printASCMenu() {
+  clearTerminal();
+  Serial.println("=== ASC Replay Mode ===");
+  Serial.print("CAN Mode: ");
+  Serial.println(canFDMode ? "FD" : "Standard");
+  Serial.println();
+
+  if (ascFileCount == 0) {
+    Serial.println("No .asc files found on SD card.");
+    Serial.println("Copy .asc files to the root of the SD card.");
+  } else {
+    Serial.println("Files on SD card:");
+    for (int i = 0; i < ascFileCount; i++) {
+      Serial.print("  ");
+      Serial.print(i + 1);
+      Serial.print(" - ");
+      Serial.print(ascFileList[i]);
+      Serial.print("  (");
+      if (ascFileSizes[i] >= 1048576) {
+        Serial.print(ascFileSizes[i] / 1048576.0, 1);
+        Serial.print(" MB");
+      } else {
+        Serial.print(ascFileSizes[i] / 1024.0, 1);
+        Serial.print(" KB");
+      }
+      Serial.println(")");
+    }
+  }
+  Serial.println();
+  Serial.println("Commands:");
+  Serial.println("  1-9  Select file");
+  Serial.println("  x    Exit ASC mode");
+}
+
+void printASCReplayStatus() {
+  clearTerminal();
+  Serial.println("=== ASC Replay ===");
+  Serial.print("File: ");
+  Serial.println(ascFileList[ascSelectedFile]);
+  Serial.print("Status: ");
+  Serial.println(ascPlaying ? "PLAYING" : "PAUSED");
+  Serial.print("Frames sent: ");
+  Serial.println(ascFramesSent);
+  Serial.print("Loops completed: ");
+  Serial.println(ascLoopCount);
+  if (ascPlaying) {
+    uint32_t elapsed = (millis() - ascReplayStartTime) / 1000;
+    Serial.print("Elapsed: ");
+    Serial.print(elapsed);
+    Serial.println("s");
+  }
+  Serial.println();
+  Serial.println("Commands:");
+  Serial.println("  p  Play / Pause");
+  Serial.println("  s  Refresh status");
+  Serial.println("  x  Stop and exit ASC mode");
+}
+
+void enterASCMode() {
+  if (sendCAN) {
+    Serial.println("Stop CAN transmission before entering ASC mode!");
+    return;
+  }
+
+  // Try to (re)initialise SD card
+  sdCardPresent = SD.begin(BUILTIN_SDCARD);
+  if (!sdCardPresent) {
+    Serial.println("No SD card detected! Insert an SD card and try again.");
+    return;
+  }
+
+  ascMode = true;
+  ascPlaying = false;
+  ascSelectedFile = -1;
+  listASCFiles();
+  printASCMenu();
+}
+
+void exitASCMode() {
+  if (ascFileOpen) {
+    ascFile.close();
+    ascFileOpen = false;
+  }
+  ascMode = false;
+  ascPlaying = false;
+  ascFrameReady = false;
+  ascSelectedFile = -1;
+  digitalWrite(LED_Pin, LOW);
+  clearTerminal();
+  Serial.println("Exited ASC mode.");
+  printCurrentRates();
+}
+
+void selectASCFile(int index) {
+  if (index < 0 || index >= ascFileCount) {
+    Serial.println("Invalid file number!");
+    return;
+  }
+
+  Serial.print("Scanning ");
+  Serial.print(ascFileList[index]);
+  Serial.println("...");
+
+  bool hasFD = scanFileForFD(ascFileList[index]);
+  if (hasFD && !canFDMode) {
+    clearTerminal();
+    Serial.println("This file contains CAN FD frames but you are");
+    Serial.println("in Standard CAN mode.");
+    Serial.println();
+    Serial.println("Exit ASC mode (x) and switch to CAN FD mode (m)");
+    Serial.println("before playing this file.");
+    Serial.println();
+    Serial.println("Press x to go back.");
+    return;
+  }
+
+  ascSelectedFile = index;
+  ascFileHasFD = hasFD;
+
+  if (ascFileOpen) {
+    ascFile.close();
+    ascFileOpen = false;
+  }
+  ascFile = SD.open(ascFileList[index]);
+  if (!ascFile) {
+    Serial.println("Failed to open file!");
+    ascSelectedFile = -1;
+    return;
+  }
+  ascFileOpen = true;
+  ascFramesSent = 0;
+  ascLoopCount = 0;
+  ascFirstTimestamp = -1.0;
+  ascFrameReady = false;
+  ascPlaying = false;
+
+  printASCReplayStatus();
+}
+
+void startASCReplay() {
+  if (!ascFileOpen) return;
+
+  if (ascFirstTimestamp >= 0 && ascFrameReady) {
+    // Resuming - adjust start time so pending frame plays immediately
+    double targetUs = (ascPendingFrame.timestamp - ascFirstTimestamp) * 1000000.0;
+    ascStartMicros = micros() - (unsigned long)targetUs;
+  } else {
+    ascStartMicros = micros();
+  }
+
+  ascPlaying = true;
+  if (ascReplayStartTime == 0) ascReplayStartTime = millis();
+  digitalWrite(LED_Pin, HIGH);
+  printASCReplayStatus();
+}
+
+void stopASCReplay() {
+  ascPlaying = false;
+  digitalWrite(LED_Pin, LOW);
+  printASCReplayStatus();
+}
+
+bool readLineFromFile() {
+  if (!ascFile.available()) return false;
+  int i = 0;
+  while (ascFile.available() && i < ASC_LINE_BUF_SIZE - 1) {
+    char c = ascFile.read();
+    if (c == '\n') break;
+    if (c != '\r') ascLineBuf[i++] = c;
+  }
+  ascLineBuf[i] = '\0';
+  return true;
+}
+
+// Skip whitespace, return pointer to next non-whitespace char
+static char* ascSkipWS(char* p) {
+  while (*p == ' ' || *p == '\t') p++;
+  return p;
+}
+
+// Read a whitespace-delimited token, return pointer past it
+static char* ascReadToken(char* p, char* token, int maxLen) {
+  p = ascSkipWS(p);
+  int i = 0;
+  while (*p && *p != ' ' && *p != '\t' && i < maxLen - 1) {
+    token[i++] = *p++;
+  }
+  token[i] = '\0';
+  return p;
+}
+
+bool parseASCLine(ASCFrame& frame) {
+  char* p = ascLineBuf;
+  char token[32];
+
+  p = ascSkipWS(p);
+  if (*p == '\0' || *p == ';' || *p == '/') return false;
+
+  // Parse timestamp
+  char* end;
+  double ts = strtod(p, &end);
+  if (end == p) return false;
+  frame.timestamp = ts;
+  p = end;
+
+  // Next token determines frame type
+  p = ascReadToken(p, token, sizeof(token));
+
+  if (strcmp(token, "CANFD") == 0) {
+    // CAN FD frame: CANFD channel dir id flags1 flags2 dlc dataLen data...
+    frame.isFD = true;
+
+    // Channel
+    p = ascReadToken(p, token, sizeof(token));
+    // Direction (Rx/Tx)
+    p = ascReadToken(p, token, sizeof(token));
+    if (strcmp(token, "Rx") != 0 && strcmp(token, "Tx") != 0) return false;
+    // CAN ID (hex)
+    p = ascReadToken(p, token, sizeof(token));
+    frame.id = strtoul(token, NULL, 16);
+    // Flag1
+    p = ascReadToken(p, token, sizeof(token));
+    // Flag2
+    p = ascReadToken(p, token, sizeof(token));
+    // DLC (hex)
+    p = ascReadToken(p, token, sizeof(token));
+    // Data length (decimal)
+    p = ascReadToken(p, token, sizeof(token));
+    frame.len = atoi(token);
+    if (frame.len > 64) frame.len = 64;
+
+    // Data bytes (hex)
+    for (int i = 0; i < frame.len; i++) {
+      p = ascReadToken(p, token, sizeof(token));
+      if (token[0] == '\0') { frame.len = i; break; }
+      frame.data[i] = (uint8_t)strtoul(token, NULL, 16);
+    }
+    return true;
+
+  } else {
+    // Possibly a standard CAN data frame: channel id dir d dlc data...
+    // token is the channel number
+    char* endp;
+    long channel = strtol(token, &endp, 10);
+    if (*endp != '\0' || channel < 1) return false;
+
+    // CAN ID (hex)
+    p = ascReadToken(p, token, sizeof(token));
+    frame.id = strtoul(token, NULL, 16);
+
+    // Direction
+    p = ascReadToken(p, token, sizeof(token));
+    if (strcmp(token, "Rx") != 0 && strcmp(token, "Tx") != 0) return false;
+
+    // "d" for data frame
+    p = ascReadToken(p, token, sizeof(token));
+    if (strcmp(token, "d") != 0) return false;
+
+    // DLC
+    p = ascReadToken(p, token, sizeof(token));
+    frame.len = atoi(token);
+    if (frame.len > 8) frame.len = 8;
+    frame.isFD = false;
+
+    // Data bytes
+    for (int i = 0; i < frame.len; i++) {
+      p = ascReadToken(p, token, sizeof(token));
+      if (token[0] == '\0') { frame.len = i; break; }
+      frame.data[i] = (uint8_t)strtoul(token, NULL, 16);
+    }
+    return true;
+  }
+}
+
+void sendASCFrame(const ASCFrame& frame) {
+  CANFD_message_t msg = {};
+  msg.id  = frame.id;
+  msg.len = frame.len;
+  msg.seq = true;
+  msg.esi = false;
+  msg.edl = frame.isFD;
+  msg.brs = frame.isFD;
+  for (int i = 0; i < frame.len; i++) {
+    msg.buf[i] = frame.data[i];
+  }
+  m_CANInterface.write(msg);
+}
+
+bool readNextASCFrame() {
+  while (readLineFromFile()) {
+    ASCFrame frame;
+    if (parseASCLine(frame)) {
+      // Skip FD frames if in standard mode (safety check)
+      if (frame.isFD && !canFDMode) continue;
+
+      ascPendingFrame = frame;
+      if (ascFirstTimestamp < 0) {
+        ascFirstTimestamp = frame.timestamp;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+void loopASCFile() {
+  ascFile.seek(0);
+  ascFirstTimestamp = -1.0;
+  ascStartMicros = micros();
+  ascFrameReady = false;
+  ascLoopCount++;
+}
+
+void processASCReplay() {
+  if (!ascMode || !ascPlaying || !ascFileOpen) return;
+
+  unsigned long now = micros();
+  int sent = 0;
+
+  while (sent < ASC_MAX_FRAMES_PER_TICK) {
+    if (!ascFrameReady) {
+      if (!readNextASCFrame()) {
+        // End of file - loop back
+        loopASCFile();
+        if (!readNextASCFrame()) {
+          Serial.println("\nASC file contains no playable frames!");
+          stopASCReplay();
+          return;
+        }
+      }
+      ascFrameReady = true;
+    }
+
+    double targetUs = (ascPendingFrame.timestamp - ascFirstTimestamp) * 1000000.0;
+    unsigned long elapsed = now - ascStartMicros;
+
+    if ((double)elapsed < targetUs) break;
+
+    sendASCFrame(ascPendingFrame);
+    ascFramesSent++;
+    ascFrameReady = false;
+    sent++;
+  }
+}
+
+void handleASCSerialInput(char input) {
+  if (ascSelectedFile >= 0) {
+    // In replay view
+    switch (input) {
+      case 'p': case 'P':
+        if (ascPlaying) {
+          stopASCReplay();
+        } else {
+          startASCReplay();
+        }
+        break;
+      case 's': case 'S':
+        printASCReplayStatus();
+        break;
+      case 'x': case 'X':
+        exitASCMode();
+        break;
+    }
+  } else {
+    // In file selection view
+    if (input >= '1' && input <= '9') {
+      selectASCFile(input - '1');
+    } else if (input == 'x' || input == 'X') {
+      exitASCMode();
+    }
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Serial command handler
+//-----------------------------------------------------------------------------
+
 void handleSerialInput(char input) {
   clearTerminal();
   switch (input) {
@@ -419,6 +900,10 @@ void handleSerialInput(char input) {
       }
       break;
 
+    case 'a': case 'A':
+      enterASCMode();
+      break;
+
     case 'h': case 'H':
       Serial.println("=== CAN Controller ===");
       Serial.println("Commands available:");
@@ -442,6 +927,7 @@ void handleSerialInput(char input) {
       Serial.println("L - Measure bus load for 3 seconds");
       Serial.print("f - Cycle TX rate: ");
       Serial.println(TX_RATE_LABELS[currentTxRateIndex]);
+      Serial.println("A - Enter ASC replay mode (SD card)");
       break;
   }
 }
@@ -459,11 +945,11 @@ void setup() {
     frameIDs[i] = frameIDs[i - 1] + 1;
   }
 
-  // Configure TX mailboxes 0–11
+  // Configure TX mailboxes 0-11
   for (int i = 0; i < 12; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, TX);
   }
-  // Configure RX mailboxes 12–14
+  // Configure RX mailboxes 12-14
   for (int i = 12; i < 15; i++) {
     m_CANInterface.setMB((FLEXCAN_MAILBOX)i, RX);
     m_CANInterface.setMBFilter((FLEXCAN_MAILBOX)i, ACCEPT_ALL);
@@ -471,6 +957,15 @@ void setup() {
   m_CANInterface.enableMBInterrupts();
 
   initFrameCounters();
+
+  // Initialise SD card
+  sdCardPresent = SD.begin(BUILTIN_SDCARD);
+  if (sdCardPresent) {
+    Serial.println("SD card detected.");
+  } else {
+    Serial.println("No SD card detected.");
+  }
+
   printCurrentRates();
 
   lastTxMicros = micros();
@@ -506,25 +1001,31 @@ void loop() {
   if (btn == LOW && lastBtn == HIGH) {
     delay(50);
     if (digitalRead(logButton) == LOW) {
-      sendCAN = !sendCAN;
-      digitalWrite(LED_Pin, sendCAN ? HIGH : LOW);
-      if (sendCAN) {
-        Serial.println("CAN transmission started.");
-        initFrameCounters();
-        countingFrames   = true;
-        sessionStartTime = millis();
-        lastTxMicros     = micros();
-      } else {
-        Serial.println("CAN transmission stopped.");
-        countingFrames = false;
-        printFrameCountSummary();
+      if (ascMode && ascFileOpen) {
+        // Toggle ASC playback
+        if (ascPlaying) stopASCReplay();
+        else startASCReplay();
+      } else if (!ascMode) {
+        sendCAN = !sendCAN;
+        digitalWrite(LED_Pin, sendCAN ? HIGH : LOW);
+        if (sendCAN) {
+          Serial.println("CAN transmission started.");
+          initFrameCounters();
+          countingFrames   = true;
+          sessionStartTime = millis();
+          lastTxMicros     = micros();
+        } else {
+          Serial.println("CAN transmission stopped.");
+          countingFrames = false;
+          printFrameCountSummary();
+        }
       }
     }
   }
   lastBtn = btn;
 
-  // TX at selected frequency
-  if (sendCAN) {
+  // TX at selected frequency (normal mode only)
+  if (sendCAN && !ascMode) {
     unsigned long now = micros();
     unsigned long interval = TX_INTERVALS_US[currentTxRateIndex];
     if (now - lastTxMicros >= interval) {
@@ -533,8 +1034,16 @@ void loop() {
     }
   }
 
+  // ASC replay processing
+  processASCReplay();
+
   // serial commands
   if (Serial.available()) {
-    handleSerialInput(Serial.read());
+    char c = Serial.read();
+    if (ascMode) {
+      handleASCSerialInput(c);
+    } else {
+      handleSerialInput(c);
+    }
   }
 }
